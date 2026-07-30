@@ -56,15 +56,15 @@ const state = {
   count: 1 << 20,
   depth: 6,
   cells: 299_593,
-  renderCount: 262_144,
-  renderStride: 4,
+  renderCount: 131_072,
+  renderStride: 8,
   resolutionScale: 1,
   running: true,
   ready: false,
   rebuilding: false,
   yaw: -0.18,
   pitch: -0.14,
-  zoom: 1.95,
+  zoom: 1.78,
   tool: "orbit",
   controlActive: false,
   controlPoint: [0, 0, 0],
@@ -362,9 +362,9 @@ async function rebuildSimulation(requestedCount = state.count) {
     state.count = state.wasm.exports.rainbow_clamp_particle_count(requestedCount);
     state.depth = state.wasm.exports.rainbow_depth_for_particles(state.count);
     state.cells = state.wasm.exports.rainbow_total_cells(state.depth);
-    // The force solve still updates every body. Rendering a deterministic
-    // quarter-million sample avoids six million blended vertices per frame.
-    state.renderStride = Math.max(1, Math.ceil(state.count / 262_144));
+    // The force solve still updates every body. A sparse visual sample keeps
+    // dense 1080p structures legible instead of blending into colored fog.
+    state.renderStride = Math.max(1, Math.ceil(state.count / 131_072));
     state.renderCount = Math.ceil(state.count / state.renderStride);
 
     const usage = GPUBufferUsage;
@@ -853,7 +853,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=control-spectrum-8");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=clarity-13");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }

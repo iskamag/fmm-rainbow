@@ -297,10 +297,12 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
         excitation = 0.08 + u3 * 0.05;
         luminosity = 0.95 + u4 * 0.10;
     } else {
-        // A retrograde polar annulus repeatedly crosses the main disc at two
-        // nodes. It supplies persistent caustics and braided streams without
-        // injecting energy after initialization.
-        let radius = 0.22 + 0.31 * pow(u0, 0.86);
+        // Four retrograde polar lanes repeatedly cross the main disc. Each
+        // lineage owns a slightly different plane, so its color describes a
+        // coherent structure instead of making one ring into rainbow noise.
+        let lineage = f32(i & 3u);
+        let radius =
+            0.22 + 0.31 * pow(u0, 0.86) + (lineage - 1.5) * 0.007;
         let angle = TAU * u1 + radius * 3.5;
         let thickness = (u2 + u3 + u4 - 1.5) *
             (0.004 + radius * 0.009);
@@ -309,7 +311,7 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
             thickness,
             radius * sin(angle),
         );
-        let tilt = 0.30;
+        let tilt = -0.54 + lineage * 0.36;
         pos = vec3<f32>(
             flat.x * cos(tilt) - flat.y * sin(tilt),
             flat.x * sin(tilt) + flat.y * cos(tilt),
@@ -718,8 +720,12 @@ fn render_vertex(
     let luminosity = clamp(particle.pos_light.w, 0.0, 1.3);
     let depth_size = clamp(perspective * 0.72, 0.48, 1.35);
     let size = render_params.point_size * depth_size *
-        (0.78 + min(velocity, 0.9) * 0.34 + excitation * 0.58) *
-        mix(0.38, 1.05, sqrt(min(luminosity, 1.0)));
+        (
+            1.05 +
+            min(velocity, 1.0) * 0.18 +
+            excitation * 0.34
+        ) *
+        mix(0.34, 1.05, sqrt(min(luminosity, 1.0)));
     let corner = corners[vertex_index];
     let screen_speed = length(view_velocity.xy);
     var streak_direction = vec2<f32>(1.0, 0.0);
@@ -730,8 +736,13 @@ fn render_vertex(
         -streak_direction.y,
         streak_direction.x,
     );
-    let stretch = 1.0 + min(velocity * 2.8, 2.4) *
-        (0.28 + excitation * 0.72);
+    // Calm particles are crisp points. Only dynamically excited material
+    // becomes a velocity streak, preventing the entire 1080p image from
+    // turning into overlapping colored brush marks.
+    let stretch =
+        1.0 +
+        excitation * excitation * 1.70 +
+        max(velocity - 0.75, 0.0) * 0.45;
     let local_pixels =
         streak_direction * (corner.x * size * stretch) +
         streak_normal * (corner.y * size);
@@ -757,45 +768,41 @@ fn render_vertex(
         max(length(angular_momentum), 0.0001);
     let family = random01(particle_index * 11u + 6u);
     let lineage = particle_index & 3u;
-    let disc_hues = array<f32, 4>(0.00, 0.17, 0.50, 0.83);
-    let polar_hues = array<f32, 4>(0.08, 0.33, 0.66, 0.92);
-    let bulge_hues = array<f32, 4>(0.10, 0.28, 0.58, 0.88);
-    var family_hue = disc_hues[lineage];
+    let disc_colors = array<vec3<f32>, 4>(
+        vec3<f32>(1.00, 0.24, 0.12),
+        vec3<f32>(1.00, 0.68, 0.08),
+        vec3<f32>(0.06, 0.72, 1.00),
+        vec3<f32>(0.70, 0.22, 1.00),
+    );
+    let polar_colors = array<vec3<f32>, 4>(
+        vec3<f32>(0.04, 0.92, 0.48),
+        vec3<f32>(0.16, 0.38, 1.00),
+        vec3<f32>(1.00, 0.12, 0.58),
+        vec3<f32>(0.62, 0.96, 0.08),
+    );
+    var spectral = disc_colors[lineage];
     if (family < 0.05) {
-        family_hue = bulge_hues[lineage];
+        spectral = vec3<f32>(1.00, 0.66, 0.30);
     } else if (family < 0.75) {
-        // The faint halo spans the spectrum by orbital-plane orientation.
-        // Angular momentum is phase-space state, not a position coordinate.
-        let plane_phase = atan2(
-            angular_momentum.z,
-            angular_momentum.x,
-        ) / TAU;
-        family_hue = fract(
-            0.52 +
-            plane_phase * 0.62 +
-            (random01(particle_index * 19u + 7u) - 0.5) * 0.12,
+        // Keep the numerous, faint mass halo quiet and cool. Its orbital-plane
+        // signature changes value, not hue, so it cannot become confetti.
+        spectral = vec3<f32>(0.12, 0.24, 0.38) * (
+            0.72 + (spin_signature * 0.5 + 0.5) * 0.34
         );
     } else if (family >= 0.93) {
-        family_hue = polar_hues[lineage];
+        spectral = polar_colors[lineage];
     }
-    // Hue is phase-space information: orbital family, infall/ejection,
-    // circularity, angular-momentum orientation, and recent excitation.
-    // Absolute position does not participate.
-    let hue = fract(
-        family_hue +
-        radial_motion * 0.10 +
-        (1.0 - circularity) * 0.055 +
-        spin_signature * 0.03 +
-        excitation * 0.07 +
-        (random01(particle_index * 23u + 11u) - 0.5) * 0.035,
-    );
-    let spectral = rainbow(hue);
-    // Excitation lifts the particle's own spectrum instead of converging all
-    // hot material toward a shared blue, pink, or amber endpoint.
+    // Phase-space state controls luminance while lineage controls a small,
+    // deliberate palette. Absolute position does not participate.
+    let state_gain =
+        0.72 +
+        circularity * 0.18 +
+        excitation * 0.25 +
+        abs(radial_motion) * 0.08;
     let heated = min(
         vec3<f32>(1.0),
-        spectral * (0.82 + excitation * 0.42) +
-        vec3<f32>(excitation * excitation * 0.11),
+        spectral * state_gain +
+        vec3<f32>(excitation * excitation * 0.06),
     );
     var control_influence = 0.0;
     var control_color = vec3<f32>(0.82, 1.0, 0.28);
@@ -841,14 +848,15 @@ fn render_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (radius2 > 1.0) {
         discard;
     }
-    let halo = exp(-radius2 * 3.0) * 0.36;
-    let core = exp(-radius2 * 18.0) * 1.25;
+    let halo = exp(-radius2 * 7.0) * 0.06;
+    let core = exp(-radius2 * 30.0) * 1.15;
     // Normalize against the visible sample, not the million simulated bodies.
     // The sampled pass stays bright while preserving a bounded fragment cost.
-    let population_scale = 0.65 * pow(
-        16384.0 / max(f32(render_params.level), 1.0),
-        0.38,
+    let population_scale = 0.48 * pow(
+        131072.0 / max(f32(render_params.level), 1.0),
+        0.16,
     );
     let intensity = (halo + core) * render_params.exposure * in.depth_fade * population_scale;
-    return vec4<f32>(in.color * intensity, clamp(intensity, 0.0, 1.0));
+    let opacity = pow(clamp(intensity, 0.0, 1.0), 0.72);
+    return vec4<f32>(in.color * opacity, opacity);
 }

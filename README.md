@@ -95,9 +95,9 @@ resolution, clock/power limits, and particle distribution; use the live frame
 readout rather than treating a build-time estimate as a benchmark.
 
 All 1,048,576 bodies participate in the force solve. The visual pass draws a
-deterministically distributed 262,144-body sample and caps its internal canvas
+deterministically distributed 131,072-body sample and caps its internal canvas
 near two million pixels. This avoids spending most of the frame on six million
-blended vertices at 4K/Retina resolution; the footer reports the visible
+blended vertices or producing dense color fog at 1080p; the footer reports the visible
 sample independently from the simulated population.
 
 The seed uses a faint live spherical component as a self-consistent orbital

@@ -83,39 +83,42 @@ the solver's asymptotic complexity.
 
 | Buffer | Approximate size |
 |---|---:|
-| Positions, luminosity, velocities, excitation | 32 MiB |
+| Positions, dynamical hue, velocities, excitation | 32 MiB |
 | 299,593 fixed-point cell moments | 4.6 MiB |
 | Acceleration + tidal local fields | 13.7 MiB |
+| Quarter-scale HDR field + blur target at 1080p | about 2 MiB |
 | Uniform plans and overhead | < 1 MiB |
-| **Core solver total** | **about 51 MiB** |
+| **Solver + visual field total** | **about 53 MiB** |
 
 This leaves substantial headroom in a 16 GiB RX 6800 for the browser,
 swapchain, and driver allocations. Actual frame rate depends on browser,
 resolution, clock/power limits, and particle distribution; use the live frame
 readout rather than treating a build-time estimate as a benchmark.
 
-All 1,048,576 bodies participate in the force solve. The visual pass draws a
-deterministically distributed 131,072-body sample and caps its internal canvas
-near two million pixels. This avoids spending most of the frame on six million
-blended vertices or producing dense color fog at 1080p; the footer reports the visible
-sample independently from the simulated population.
+All 1,048,576 bodies participate in both the force solve and the visual pass.
+Each body makes one additive deposit into a quarter-scale `rgba16float`
+color-and-density field. A fixed horizontal/vertical Gaussian reconstruction
+then expands that compact field into large, smooth gradients. The fullscreen
+resolve divides accumulated color by accumulated density before tone mapping,
+so overlap increases presence without bleaching every structure into fog. No
+visual subsample is hidden; the footer reports the full visible population.
 
 The seed uses a faint live spherical component as a self-consistent orbital
 backbone, plus a luminous four-arm disc and a counter-rotating polar annulus.
 The halo bodies move and contribute to gravity; their low luminosity prevents
-them from turning the view into fog. The original four arms and the polar
-population each contain four persistent spectral lineages. Orbital-plane
-orientation, angular momentum, infall/ejection, circularity, and a slowly
-decaying compression/excitation state modify those colors. Excitation
-brightens the particle's own spectrum instead of converging toward one common
-hot color. Absolute position is not a color input.
+them from turning the view into fog. Luminous bodies receive a continuous hue
+from their initial velocity direction, orbital inclination, radial motion,
+excitation, and a small lineage phase. That hue persists as material state and
+is slowly advected by shocks and interactive work, producing gradients that
+flow around an orbit rather than discrete lane colors. Absolute position is
+not a color input.
 
 In local Playwright runs on 2026-07-30, Chromium exposed an AMD `rdna-2`
-adapter (but no model string). Queue-drained diagnostics measured 7.3 ms at a
-1920×1080 viewport and 8.6 ms at a 3840×2160 viewport. The live frame loop is
-deliberately not queue-drained: a per-frame `onSubmittedWorkDone()` fence
-starved Firefox's submit/present pipeline. With that fence removed, the full
-million-particle loop held the test display's 60 Hz ceiling at 1280×720. A
+adapter (but no model string). The current million-deposit HDR build reported
+roughly 50–53 FPS at a 1920×1080 viewport with a 1885×1060 internal canvas;
+the exact result varied with evolution and browser scheduling. The live frame
+loop is deliberately not queue-drained: a per-frame
+`onSubmittedWorkDone()` fence starved Firefox's submit/present pipeline. A
 8,192-particle readback after exercising Pull, Push, and Vortex contained no
 non-finite values. These are measurements from one machine, not a portable RX
 6800 guarantee.

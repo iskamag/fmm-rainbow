@@ -51,13 +51,19 @@ const state = {
   buffers: null,
   computeBindGroup: null,
   renderBindGroup: null,
+  accumulationBindGroup: null,
+  blurBindGroup: null,
   computeParams: null,
   renderParams: null,
+  accumulationTexture: null,
+  accumulationView: null,
+  blurTexture: null,
+  blurView: null,
   count: 1 << 20,
   depth: 6,
   cells: 299_593,
-  renderCount: 131_072,
-  renderStride: 8,
+  renderCount: 1 << 20,
+  renderStride: 1,
   resolutionScale: 1,
   running: true,
   ready: false,
@@ -88,6 +94,8 @@ const PARAM_SLOTS = 16;
 const PARTICLE_BYTES = 32;
 const MOMENT_BYTES = 16;
 const FIELD_BYTES = 48;
+const ACCUMULATION_FORMAT = "rgba16float";
+const ACCUMULATION_SCALE = 0.25;
 
 async function instantiateWasm(url) {
   const response = await fetch(url);
@@ -135,9 +143,9 @@ function makeParams(level, upward = false, render = false) {
   uints.forEach((value, index) => view.setUint32(index * 4, value, true));
 
   const floats = [
-    0.0009,
-    Number(ui.gravity.value),
-    Number(ui.softening.value),
+    render ? Math.cos(state.yaw) : 0.0009,
+    render ? Math.sin(state.yaw) : Number(ui.gravity.value),
+    render ? Math.cos(state.pitch) : Number(ui.softening.value),
     Number(ui.glow.value),
     state.elapsed,
     ui.canvas.width / Math.max(1, ui.canvas.height),
@@ -157,7 +165,7 @@ function makeParams(level, upward = false, render = false) {
     TOOL_MODES[state.tool] || 0,
     Number(ui.controlStrength.value),
     Number(ui.controlRadius.value),
-    0,
+    render ? Math.sin(state.pitch) : 0,
     0,
   ];
   floats.forEach((value, index) => view.setFloat32(32 + index * 4, value, true));
@@ -190,6 +198,44 @@ function updateRenderParams() {
   );
 }
 
+function rebuildAccumulationTarget() {
+  if (!state.device || !state.resolveLayout || !ui.canvas.width || !ui.canvas.height) return;
+  state.accumulationTexture?.destroy();
+  state.blurTexture?.destroy();
+  const width = Math.max(1, Math.ceil(ui.canvas.width * ACCUMULATION_SCALE));
+  const height = Math.max(1, Math.ceil(ui.canvas.height * ACCUMULATION_SCALE));
+  state.accumulationTexture = state.device.createTexture({
+    label: "HDR particle color and density",
+    size: [width, height],
+    format: ACCUMULATION_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+  state.accumulationView = state.accumulationTexture.createView();
+  state.blurTexture = state.device.createTexture({
+    label: "Horizontally reconstructed HDR field",
+    size: [width, height],
+    format: ACCUMULATION_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+  state.blurView = state.blurTexture.createView();
+  state.accumulationBindGroup = state.device.createBindGroup({
+    label: "Raw HDR field bind group",
+    layout: state.resolveLayout,
+    entries: [
+      { binding: 0, resource: state.accumulationView },
+      { binding: 1, resource: state.resolveSampler },
+    ],
+  });
+  state.blurBindGroup = state.device.createBindGroup({
+    label: "Horizontally reconstructed field bind group",
+    layout: state.resolveLayout,
+    entries: [
+      { binding: 0, resource: state.blurView },
+      { binding: 1, resource: state.resolveSampler },
+    ],
+  });
+}
+
 function resizeCanvas() {
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   const rawWidth = Math.max(1, ui.canvas.clientWidth * dpr);
@@ -203,6 +249,7 @@ function resizeCanvas() {
     ui.canvas.width = width;
     ui.canvas.height = height;
     updateComputeParams();
+    rebuildAccumulationTarget();
   }
 }
 
@@ -318,26 +365,87 @@ async function createPipelines() {
     ],
   });
   const renderPipelineLayout = device.createPipelineLayout({
-    label: "Rainbow render pipeline layout",
+    label: "Rainbow HDR accumulation pipeline layout",
     bindGroupLayouts: [emptyLayout, state.renderLayout],
   });
   state.pipelines.render = await device.createRenderPipelineAsync({
-    label: "Additive rainbow particle renderer",
+    label: "HDR rainbow particle accumulation",
     layout: renderPipelineLayout,
     vertex: { module, entryPoint: "render_vertex" },
     fragment: {
       module,
       entryPoint: "render_fragment",
       targets: [{
-        format: state.format,
+        format: ACCUMULATION_FORMAT,
         blend: {
-          color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-          alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+          color: { srcFactor: "one", dstFactor: "one", operation: "add" },
+          alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
         },
       }],
     },
+    primitive: { topology: "point-list", cullMode: "none" },
+  });
+
+  state.resolveLayout = device.createBindGroupLayout({
+    label: "HDR density resolve texture",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "float" },
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: "filtering" },
+      },
+    ],
+  });
+  state.resolveSampler = device.createSampler({
+    label: "Smooth HDR field reconstruction",
+    addressModeU: "clamp-to-edge",
+    addressModeV: "clamp-to-edge",
+    minFilter: "linear",
+    magFilter: "linear",
+  });
+  const resolvePipelineLayout = device.createPipelineLayout({
+    label: "HDR field reconstruction pipeline layout",
+    bindGroupLayouts: [emptyLayout, state.renderLayout, state.resolveLayout],
+  });
+  state.pipelines.blur = await device.createRenderPipelineAsync({
+    label: "Horizontal HDR field reconstruction",
+    layout: resolvePipelineLayout,
+    vertex: { module, entryPoint: "resolve_vertex" },
+    fragment: {
+      module,
+      entryPoint: "blur_horizontal_fragment",
+      targets: [{ format: ACCUMULATION_FORMAT }],
+    },
     primitive: { topology: "triangle-list", cullMode: "none" },
   });
+  state.pipelines.blurVertical = await device.createRenderPipelineAsync({
+    label: "Vertical HDR field reconstruction",
+    layout: resolvePipelineLayout,
+    vertex: { module, entryPoint: "resolve_vertex" },
+    fragment: {
+      module,
+      entryPoint: "blur_vertical_fragment",
+      targets: [{ format: ACCUMULATION_FORMAT }],
+    },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+  });
+  state.pipelines.resolve = await device.createRenderPipelineAsync({
+    label: "Density-normalized rainbow resolve",
+    layout: resolvePipelineLayout,
+    vertex: { module, entryPoint: "resolve_vertex" },
+    fragment: {
+      module,
+      entryPoint: "resolve_fragment",
+      targets: [{ format: state.format }],
+    },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+  });
+  rebuildAccumulationTarget();
 }
 
 function createBuffer(label, size, usage) {
@@ -362,15 +470,14 @@ async function rebuildSimulation(requestedCount = state.count) {
     state.count = state.wasm.exports.rainbow_clamp_particle_count(requestedCount);
     state.depth = state.wasm.exports.rainbow_depth_for_particles(state.count);
     state.cells = state.wasm.exports.rainbow_total_cells(state.depth);
-    // The force solve still updates every body. A sparse visual sample keeps
-    // dense 1080p structures legible instead of blending into colored fog.
-    state.renderStride = Math.max(1, Math.ceil(state.count / 131_072));
-    state.renderCount = Math.ceil(state.count / state.renderStride);
+    // Every simulated body contributes to the compact HDR density field.
+    state.renderStride = 1;
+    state.renderCount = state.count;
 
     const usage = GPUBufferUsage;
     state.buffers = {
       particles: createBuffer(
-        "Particles: position/luminosity + velocity/excitation",
+        "Particles: position/dynamical hue + velocity/excitation",
         state.count * PARTICLE_BYTES,
         usage.STORAGE | usage.COPY_DST | usage.COPY_SRC,
       ),
@@ -462,19 +569,64 @@ function encodeSolver(encoder) {
 
 function encodeRender(encoder, targetView = null) {
   updateRenderParams();
-  const pass = encoder.beginRenderPass({
-    label: "Rainbow particle field",
+  const accumulationPass = encoder.beginRenderPass({
+    label: "HDR particle color and density accumulation",
     colorAttachments: [{
-      view: targetView || state.context.getCurrentTexture().createView(),
-      clearValue: { r: 0.012, g: 0.014, b: 0.019, a: 1 },
+      view: state.accumulationView,
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
       loadOp: "clear",
       storeOp: "store",
     }],
   });
-  pass.setPipeline(state.pipelines.render);
-  pass.setBindGroup(1, state.renderBindGroup);
-  pass.draw(6, state.renderCount);
-  pass.end();
+  accumulationPass.setPipeline(state.pipelines.render);
+  accumulationPass.setBindGroup(1, state.renderBindGroup);
+  accumulationPass.draw(1, state.renderCount);
+  accumulationPass.end();
+
+  const blurPass = encoder.beginRenderPass({
+    label: "Horizontal HDR field reconstruction",
+    colorAttachments: [{
+      view: state.blurView,
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      loadOp: "clear",
+      storeOp: "store",
+    }],
+  });
+  blurPass.setPipeline(state.pipelines.blur);
+  blurPass.setBindGroup(1, state.renderBindGroup);
+  blurPass.setBindGroup(2, state.accumulationBindGroup);
+  blurPass.draw(3);
+  blurPass.end();
+
+  const verticalBlurPass = encoder.beginRenderPass({
+    label: "Vertical HDR field reconstruction",
+    colorAttachments: [{
+      view: state.accumulationView,
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      loadOp: "clear",
+      storeOp: "store",
+    }],
+  });
+  verticalBlurPass.setPipeline(state.pipelines.blurVertical);
+  verticalBlurPass.setBindGroup(1, state.renderBindGroup);
+  verticalBlurPass.setBindGroup(2, state.blurBindGroup);
+  verticalBlurPass.draw(3);
+  verticalBlurPass.end();
+
+  const resolvePass = encoder.beginRenderPass({
+    label: "Density-normalized rainbow resolve",
+    colorAttachments: [{
+      view: targetView || state.context.getCurrentTexture().createView(),
+      clearValue: { r: 0.008, g: 0.010, b: 0.016, a: 1 },
+      loadOp: "clear",
+      storeOp: "store",
+    }],
+  });
+  resolvePass.setPipeline(state.pipelines.resolve);
+  resolvePass.setBindGroup(1, state.renderBindGroup);
+  resolvePass.setBindGroup(2, state.accumulationBindGroup);
+  resolvePass.draw(3);
+  resolvePass.end();
 }
 
 function frame(now) {
@@ -853,7 +1005,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=clarity-13");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=gradient-hdr-18");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }

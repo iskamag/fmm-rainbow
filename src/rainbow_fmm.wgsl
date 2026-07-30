@@ -45,7 +45,7 @@ struct Params {
 }
 
 struct Particle {
-    // xyz = position; w = luminosity. Dynamical mass is equal and implicit.
+    // xyz = position; w = persistent dynamical hue.
     pos_light: vec4<f32>,
     // xyz = velocity; w = slowly decaying dynamical excitation.
     vel_hue: vec4<f32>,
@@ -74,6 +74,8 @@ struct Field {
 
 @group(1) @binding(0) var<uniform> render_params: Params;
 @group(1) @binding(1) var<storage, read> render_particles: array<Particle>;
+@group(2) @binding(0) var accumulation_texture: texture_2d<f32>;
+@group(2) @binding(1) var accumulation_sampler: sampler;
 
 fn zero_field() -> Field {
     return Field(
@@ -223,7 +225,6 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
     var pos: vec3<f32>;
     var vel: vec3<f32>;
     var excitation: f32;
-    var luminosity: f32;
 
     if (u5 < 0.75) {
         // A live spherical mass component is the orbital backbone. Every halo
@@ -261,7 +262,6 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         vel = orbital * normalize(tangent);
         excitation = select(0.025 + u4 * 0.025, 0.09, u5 < 0.05);
-        luminosity = select(0.032, 0.10, u5 < 0.05);
     } else if (u5 < 0.93) {
         // A luminous four-arm tracer disc. The halo-dominated rotation curve
         // has much less differential shear, so its density waves survive.
@@ -295,11 +295,9 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
             sin(angle * 3.0 - radius * 13.0);
         vel = orbital * normalize(tangent) + radial;
         excitation = 0.08 + u3 * 0.05;
-        luminosity = 0.95 + u4 * 0.10;
     } else {
         // Four retrograde polar lanes repeatedly cross the main disc. Each
-        // lineage owns a slightly different plane, so its color describes a
-        // coherent structure instead of making one ring into rainbow noise.
+        // lineage owns a slightly different plane.
         let lineage = f32(i & 3u);
         let radius =
             0.22 + 0.31 * pow(u0, 0.86) + (lineage - 1.5) * 0.007;
@@ -328,10 +326,30 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         vel = -orbital * normalize(tangent);
         excitation = 0.20 + u4 * 0.08;
-        luminosity = 1.16 + u3 * 0.12;
     }
 
-    particles[i].pos_light = vec4<f32>(pos, luminosity);
+    var dynamical_hue = 0.0;
+    if (u5 >= 0.75) {
+        let speed = max(length(vel), 0.0001);
+        let radius = max(length(pos), 0.0001);
+        let radial_motion = clamp(
+            dot(pos, vel) / (radius * speed),
+            -1.0,
+            1.0,
+        );
+        let angular_momentum = cross(pos, vel);
+        let spin_signature = angular_momentum.y /
+            max(length(angular_momentum), 0.0001);
+        dynamical_hue = fract(
+            atan2(vel.y, vel.x) / TAU +
+            (vel.z / speed) * 0.14 +
+            spin_signature * 0.075 +
+            radial_motion * 0.065 +
+            excitation * 0.085 +
+            f32(i & 3u) * 0.018
+        );
+    }
+    particles[i].pos_light = vec4<f32>(pos, dynamical_hue);
     particles[i].vel_hue = vec4<f32>(vel, excitation);
 }
 
@@ -605,9 +623,12 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.dt * params.speed;
     let radius = max(length(pos), 0.0001);
     let velocity_length = max(length(velocity), 0.0001);
-    let radial_fraction = abs(
+    let signed_radial_motion = clamp(
         dot(pos, velocity) / (radius * velocity_length),
+        -1.0,
+        1.0,
     );
+    let radial_fraction = abs(signed_radial_motion);
     let radial_shock = radial_fraction * radial_fraction * radial_fraction;
     let density_pulse = clamp(
         (f32(count) - f32(ADAPTIVE_LEAF_CAPACITY)) / 72.0,
@@ -650,7 +671,19 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    particle.pos_light = vec4<f32>(pos, particle.pos_light.w);
+    // Hue is a persistent material state seeded from orbital phase. Shocks and
+    // external work advect it slowly, so color reacts without a render-time
+    // coordinate lookup or expensive per-vertex inverse trigonometry.
+    let dynamical_hue = fract(
+        particle.pos_light.w +
+        dt * (
+            0.012 +
+            signed_radial_motion * 0.030 +
+            excitation * 0.036 +
+            control_influence * 0.080
+        )
+    );
+    particle.pos_light = vec4<f32>(pos, dynamical_hue);
     particle.vel_hue = vec4<f32>(velocity, excitation);
     particles[i] = particle;
 }
@@ -667,11 +700,13 @@ fn rainbow(hue: f32) -> vec3<f32> {
     return 0.5 + 0.5 * cos(TAU * (hue + phase));
 }
 
-fn rotate_camera(p: vec3<f32>, yaw: f32, pitch: f32) -> vec3<f32> {
-    let cy = cos(yaw);
-    let sy = sin(yaw);
-    let cp = cos(pitch);
-    let sp = sin(pitch);
+fn rotate_camera(p: vec3<f32>) -> vec3<f32> {
+    // Render plans cache these four trigonometric values in compute-only
+    // parameter slots, avoiding four transcendental evaluations per body.
+    let cy = render_params.dt;
+    let sy = render_params.gravity;
+    let cp = render_params.softening;
+    let sp = render_params.control_settings.z;
     let y_rotated = vec3<f32>(cy * p.x + sy * p.z, p.y, -sy * p.x + cy * p.z);
     return vec3<f32>(
         y_rotated.x,
@@ -682,26 +717,13 @@ fn rotate_camera(p: vec3<f32>, yaw: f32, pitch: f32) -> vec3<f32> {
 
 @vertex
 fn render_vertex(
-    @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
-    let corners = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
     let particle_index = (
         instance_index * 747796405u + 2891336453u
     ) % render_params.particle_count;
     let particle = render_particles[particle_index];
-    let rotated = rotate_camera(
-        particle.pos_light.xyz,
-        render_params.camera_yaw,
-        render_params.camera_pitch,
-    );
+    let rotated = rotate_camera(particle.pos_light.xyz);
     let view_z = render_params.speed - rotated.z;
     let perspective = 1.92 / view_z;
     let center = vec2<f32>(
@@ -710,95 +732,37 @@ fn render_vertex(
     );
     let world = particle.pos_light.xyz;
     let world_velocity = particle.vel_hue.xyz;
-    let view_velocity = rotate_camera(
-        world_velocity,
-        render_params.camera_yaw,
-        render_params.camera_pitch,
-    );
     let velocity = length(world_velocity);
-    let excitation = clamp(particle.vel_hue.w, 0.0, 1.0);
-    let luminosity = clamp(particle.pos_light.w, 0.0, 1.3);
-    let depth_size = clamp(perspective * 0.72, 0.48, 1.35);
-    let size = render_params.point_size * depth_size *
-        (
-            1.05 +
-            min(velocity, 1.0) * 0.18 +
-            excitation * 0.34
-        ) *
-        mix(0.34, 1.05, sqrt(min(luminosity, 1.0)));
-    let corner = corners[vertex_index];
-    let screen_speed = length(view_velocity.xy);
-    var streak_direction = vec2<f32>(1.0, 0.0);
-    if (screen_speed > 0.00001) {
-        streak_direction = view_velocity.xy / screen_speed;
-    }
-    let streak_normal = vec2<f32>(
-        -streak_direction.y,
-        streak_direction.x,
-    );
-    // Calm particles are crisp points. Only dynamically excited material
-    // becomes a velocity streak, preventing the entire 1080p image from
-    // turning into overlapping colored brush marks.
-    let stretch =
-        1.0 +
-        excitation * excitation * 1.70 +
-        max(velocity - 0.75, 0.0) * 0.45;
-    let local_pixels =
-        streak_direction * (corner.x * size * stretch) +
-        streak_normal * (corner.y * size);
-    let clip_offset = vec2<f32>(
-        2.0 * local_pixels.x / render_params.viewport_width,
-        2.0 * local_pixels.y / render_params.viewport_height,
-    );
-
-    let radius = max(length(world), 0.0001);
     let speed = max(velocity, 0.0001);
-    let radial_motion = clamp(
-        dot(world, world_velocity) / (radius * speed),
-        -1.0,
-        1.0,
-    );
-    let angular_momentum = cross(world, world_velocity);
-    let circularity = clamp(
-        length(angular_momentum) / (radius * speed),
-        0.0,
-        1.0,
-    );
-    let spin_signature = angular_momentum.y /
-        max(length(angular_momentum), 0.0001);
+    let excitation = clamp(particle.vel_hue.w, 0.0, 1.0);
     let family = random01(particle_index * 11u + 6u);
-    let lineage = particle_index & 3u;
-    let disc_colors = array<vec3<f32>, 4>(
-        vec3<f32>(1.00, 0.24, 0.12),
-        vec3<f32>(1.00, 0.68, 0.08),
-        vec3<f32>(0.06, 0.72, 1.00),
-        vec3<f32>(0.70, 0.22, 1.00),
-    );
-    let polar_colors = array<vec3<f32>, 4>(
-        vec3<f32>(0.04, 0.92, 0.48),
-        vec3<f32>(0.16, 0.38, 1.00),
-        vec3<f32>(1.00, 0.12, 0.58),
-        vec3<f32>(0.62, 0.96, 0.08),
-    );
-    var spectral = disc_colors[lineage];
+    var luminosity = 1.0;
+    var spectral = vec3<f32>(1.00, 0.66, 0.30);
     if (family < 0.05) {
+        luminosity = 0.10;
         spectral = vec3<f32>(1.00, 0.66, 0.30);
     } else if (family < 0.75) {
+        luminosity = 0.032;
         // Keep the numerous, faint mass halo quiet and cool. Its orbital-plane
         // signature changes value, not hue, so it cannot become confetti.
         spectral = vec3<f32>(0.12, 0.24, 0.38) * (
-            0.72 + (spin_signature * 0.5 + 0.5) * 0.34
+            0.72 + (world_velocity.y / speed * 0.5 + 0.5) * 0.34
         );
-    } else if (family >= 0.93) {
-        spectral = polar_colors[lineage];
+    } else {
+        if (family >= 0.93) {
+            luminosity = 1.22;
+        }
+        spectral = pow(
+            rainbow(particle.pos_light.w),
+            vec3<f32>(0.88),
+        );
     }
-    // Phase-space state controls luminance while lineage controls a small,
-    // deliberate palette. Absolute position does not participate.
+    // Phase-space state controls both the continuous spectrum and luminance.
+    // Absolute position does not participate.
     let state_gain =
-        0.72 +
-        circularity * 0.18 +
-        excitation * 0.25 +
-        abs(radial_motion) * 0.08;
+        0.80 +
+        min(velocity, 1.0) * 0.10 +
+        excitation * 0.26;
     let heated = min(
         vec3<f32>(1.0),
         spectral * state_gain +
@@ -828,11 +792,11 @@ fn render_vertex(
 
     var out: VertexOutput;
     out.position = vec4<f32>(
-        center + clip_offset,
+        center,
         0.46 + rotated.z * 0.08,
         1.0,
     );
-    out.uv = corner;
+    out.uv = vec2<f32>(0.0);
     out.color = display_color;
     out.depth_fade =
         clamp(0.62 + rotated.z * 0.25, 0.28, 1.0) *
@@ -844,19 +808,111 @@ fn render_vertex(
 
 @fragment
 fn render_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let radius2 = dot(in.uv, in.uv);
-    if (radius2 > 1.0) {
-        discard;
-    }
-    let halo = exp(-radius2 * 7.0) * 0.06;
-    let core = exp(-radius2 * 30.0) * 1.15;
-    // Normalize against the visible sample, not the million simulated bodies.
-    // The sampled pass stays bright while preserving a bounded fragment cost.
-    let population_scale = 0.48 * pow(
-        131072.0 / max(f32(render_params.level), 1.0),
-        0.16,
+    let population_scale = 0.62 * pow(
+        1048576.0 / max(f32(render_params.level), 1.0),
+        0.14,
     );
-    let intensity = (halo + core) * render_params.exposure * in.depth_fade * population_scale;
-    let opacity = pow(clamp(intensity, 0.0, 1.0), 0.72);
-    return vec4<f32>(in.color * opacity, opacity);
+    let weight =
+        render_params.exposure * in.depth_fade * population_scale;
+    // RGB is premultiplied color energy; alpha is density. Both add without
+    // clamping in rgba16float.
+    return vec4<f32>(in.color * weight, weight);
+}
+
+@vertex
+fn resolve_vertex(
+    @builtin(vertex_index) vertex_index: u32,
+) -> @builtin(position) vec4<f32> {
+    let positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    return vec4<f32>(positions[vertex_index], 0.0, 1.0);
+}
+
+fn reconstruct_field(uv: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(accumulation_texture));
+    let size_control = clamp(
+        (render_params.point_size - 0.4) / 1.8,
+        0.0,
+        1.0,
+    );
+    let step = axis *
+        mix(0.75, 1.25, size_control) /
+        dimensions;
+    var field = textureSample(
+        accumulation_texture, accumulation_sampler, uv,
+    ) * 0.227027;
+    field += textureSample(
+        accumulation_texture,
+        accumulation_sampler,
+        uv + step * 1.384615,
+    ) * 0.316216;
+    field += textureSample(
+        accumulation_texture,
+        accumulation_sampler,
+        uv - step * 1.384615,
+    ) * 0.316216;
+    field += textureSample(
+        accumulation_texture,
+        accumulation_sampler,
+        uv + step * 3.230769,
+    ) * 0.070270;
+    field += textureSample(
+        accumulation_texture,
+        accumulation_sampler,
+        uv - step * 3.230769,
+    ) * 0.070270;
+    return field;
+}
+
+@fragment
+fn blur_horizontal_fragment(
+    @builtin(position) position: vec4<f32>,
+) -> @location(0) vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(accumulation_texture));
+    let uv = position.xy / dimensions;
+    return reconstruct_field(uv, vec2<f32>(1.0, 0.0));
+}
+
+@fragment
+fn blur_vertical_fragment(
+    @builtin(position) position: vec4<f32>,
+) -> @location(0) vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(accumulation_texture));
+    let uv = position.xy / dimensions;
+    return reconstruct_field(uv, vec2<f32>(0.0, 1.0));
+}
+
+@fragment
+fn resolve_fragment(
+    @builtin(position) position: vec4<f32>,
+) -> @location(0) vec4<f32> {
+    let uv = position.xy / vec2<f32>(
+        render_params.viewport_width,
+        render_params.viewport_height,
+    );
+    let accumulated = textureSample(
+        accumulation_texture,
+        accumulation_sampler,
+        uv,
+    );
+    let background = vec3<f32>(0.006, 0.008, 0.015);
+    if (accumulated.a < 0.00001) {
+        return vec4<f32>(background, 1.0);
+    }
+
+    // Density normalization makes a red cloud remain red whether one or one
+    // hundred samples overlap. The density controls opacity separately.
+    let average = accumulated.rgb / accumulated.a;
+    let luma = dot(average, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let vivid = max(
+        vec3<f32>(0.0),
+        mix(vec3<f32>(luma), average, 1.16),
+    );
+    let density = sqrt(accumulated.a / (accumulated.a + 2.0));
+    let mapped = vec3<f32>(1.0) - exp(-vivid * density * 1.58);
+    let display = pow(clamp(mapped + background, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.82));
+    return vec4<f32>(display, 1.0);
 }

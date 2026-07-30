@@ -9,6 +9,10 @@
 const FIXED_POINT: f32 = 1024.0;
 const TAU: f32 = 6.28318530718;
 const ADAPTIVE_LEAF_CAPACITY: u32 = 16u;
+// A 60% wider half-extent gives escaped structures 4.1x the old volume while
+// keeping worst-case fixed-point moment sums safely inside signed i32.
+const WORLD_HALF_EXTENT: f32 = 1.60;
+const WORLD_EDGE: f32 = WORLD_HALF_EXTENT * 0.985;
 
 struct Params {
     particle_count: u32,
@@ -114,11 +118,20 @@ fn cell_coord(index: u32, dim: u32) -> vec3<u32> {
 }
 
 fn cell_center(c: vec3<u32>, dim: u32) -> vec3<f32> {
-    return (vec3<f32>(c) + vec3<f32>(0.5)) * (2.0 / f32(dim)) - vec3<f32>(1.0);
+    return (
+        (vec3<f32>(c) + vec3<f32>(0.5)) *
+        (2.0 / f32(dim)) -
+        vec3<f32>(1.0)
+    ) * WORLD_HALF_EXTENT;
 }
 
 fn position_cell(pos: vec3<f32>, dim: u32) -> vec3<u32> {
-    let scaled = floor((clamp(pos, vec3<f32>(-0.99999), vec3<f32>(0.99999)) * 0.5 + 0.5) * f32(dim));
+    let normalized = clamp(
+        pos / WORLD_HALF_EXTENT,
+        vec3<f32>(-0.99999),
+        vec3<f32>(0.99999),
+    );
+    let scaled = floor((normalized * 0.5 + 0.5) * f32(dim));
     return vec3<u32>(scaled);
 }
 
@@ -460,7 +473,9 @@ fn m2l(@builtin(global_invocation_id) gid: vec3<u32>) {
                             let source_u = vec3<u32>(source_c);
                             let source_index = params.level_offset +
                                 linear_index(source_u, params.level_dim);
-                            let cell_epsilon = 0.06 / f32(params.level_dim);
+                            let cell_epsilon =
+                                0.06 * WORLD_HALF_EXTENT /
+                                f32(params.level_dim);
                             result = add_field(
                                 result,
                                 pair_field(source_index, target_center, cell_epsilon),
@@ -519,7 +534,10 @@ fn near_field(@builtin(global_invocation_id) gid: vec3<u32>) {
     let target_center = cell_center(tc_u, params.level_dim);
     let dim_i = i32(params.level_dim);
     var result = fields[target_index];
-    let near_epsilon = max(params.softening, 0.72 / f32(params.level_dim));
+    let near_epsilon = max(
+        params.softening,
+        0.72 * WORLD_HALF_EXTENT / f32(params.level_dim),
+    );
     for (var dz = -1; dz <= 1; dz++) {
         for (var dy = -1; dy <= 1; dy++) {
             for (var dx = -1; dx <= 1; dx++) {
@@ -580,7 +598,10 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (count > 1u) {
         let com = moment_com(cell_index, count);
         let delta = com - pos;
-        let epsilon = max(params.softening, 0.62 / f32(chosen_dim));
+        let epsilon = max(
+            params.softening,
+            0.62 * WORLD_HALF_EXTENT / f32(chosen_dim),
+        );
         let inv_r = inverseSqrt(dot(delta, delta) + epsilon * epsilon);
         let self_mass = f32(count - 1u) / f32(params.particle_count);
         acceleration += params.gravity * self_mass * delta * inv_r * inv_r * inv_r;
@@ -662,11 +683,11 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     velocity += acceleration * dt;
     pos += velocity * dt;
 
-    // A safety boundary only affects escaped particles. Normal presets stay
-    // well inside it; it prevents fixed-point overflow after extreme tweaking.
+    // A safety boundary only affects particles that escape the expanded FMM
+    // domain. It prevents fixed-point overflow after extreme tweaking.
     for (var axis = 0u; axis < 3u; axis++) {
-        if (abs(pos[axis]) > 0.995) {
-            pos[axis] = clamp(pos[axis], -0.995, 0.995);
+        if (abs(pos[axis]) > WORLD_EDGE) {
+            pos[axis] = clamp(pos[axis], -WORLD_EDGE, WORLD_EDGE);
             velocity[axis] *= -0.82;
         }
     }
@@ -724,8 +745,14 @@ fn render_vertex(
     ) % render_params.particle_count;
     let particle = render_particles[particle_index];
     let rotated = rotate_camera(particle.pos_light.xyz);
-    let view_z = render_params.speed - rotated.z;
-    let perspective = 1.92 / view_z;
+    // Move the camera back with the larger domain while retaining the original
+    // on-screen scale for the unchanged central seed.
+    let view_z =
+        render_params.speed * WORLD_HALF_EXTENT -
+        rotated.z;
+    let perspective =
+        1.92 * WORLD_HALF_EXTENT /
+        view_z;
     let center = vec2<f32>(
         rotated.x * perspective / render_params.aspect,
         rotated.y * perspective,

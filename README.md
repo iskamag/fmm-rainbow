@@ -108,6 +108,8 @@ time.
 
 The seed uses a faint live spherical component as a self-consistent orbital
 backbone, plus a luminous four-arm disc and a counter-rotating polar annulus.
+The FMM domain spans `[-1.60, +1.60]` on each axis—4.1 times the volume of the
+original unit half-extent—while the central seed retains its original scale.
 The halo bodies move and contribute to gravity; their low luminosity prevents
 them from turning the view into fog. Luminous bodies receive a continuous hue
 from their initial velocity direction, orbital inclination, radial motion,

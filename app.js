@@ -1005,7 +1005,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=gradient-core-19");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=wide-world-20");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }

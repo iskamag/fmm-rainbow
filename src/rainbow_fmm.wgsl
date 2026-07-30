@@ -35,6 +35,13 @@ struct Params {
     viewport_height: f32,
     exposure: f32,
     speed: f32,
+
+    // xyz = world-space brush center; w = active.
+    control_point: vec4<f32>,
+    // xyz = view-facing vortex axis; w = 1 pull, 2 push, 3 vortex.
+    control_axis_mode: vec4<f32>,
+    // x = acceleration, y = radius; zw reserved for diagnostics.
+    control_settings: vec4<f32>,
 }
 
 struct Particle {
@@ -559,6 +566,38 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         acceleration += params.gravity * self_mass * delta * inv_r * inv_r * inv_r;
     }
 
+    // The interactive shepherd is a smooth, finite-radius external field.
+    // It is one bounded calculation per body, so it does not change O(N).
+    var control_influence = 0.0;
+    if (params.control_point.w > 0.5) {
+        let control_delta = params.control_point.xyz - pos;
+        let distance2 = dot(control_delta, control_delta);
+        let control_radius = max(params.control_settings.y, 0.02);
+        control_influence = exp(
+            -2.0 * distance2 / (control_radius * control_radius),
+        );
+        let control_strength = params.control_settings.x;
+        let direction = control_delta * inverseSqrt(
+            distance2 + control_radius * control_radius * 0.018,
+        );
+        let mode = params.control_axis_mode.w;
+        if (mode < 1.5) {
+            acceleration += direction * control_strength * control_influence;
+        } else if (mode < 2.5) {
+            acceleration -= direction * control_strength * control_influence;
+        } else {
+            let tangent = cross(
+                normalize(params.control_axis_mode.xyz),
+                control_delta,
+            );
+            let tangent_length = length(tangent);
+            if (tangent_length > 0.00001) {
+                acceleration += tangent / tangent_length *
+                    control_strength * control_influence;
+            }
+        }
+    }
+
     // One-force symplectic Euler: unlike explicit Euler, energy error remains
     // bounded for the smooth Hamiltonian used by the visual simulation.
     let dt = params.dt * params.speed;
@@ -582,7 +621,8 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         0.025 +
         radial_shock * 0.56 +
         density_pulse * 0.26 +
-        field_strength * 0.13,
+        field_strength * 0.13 +
+        control_influence * 0.42,
         0.0,
         1.0,
     );
@@ -716,29 +756,67 @@ fn render_vertex(
     let spin_signature = angular_momentum.y /
         max(length(angular_momentum), 0.0001);
     let family = random01(particle_index * 11u + 6u);
-    var family_hue = 0.56;
+    let lineage = particle_index & 3u;
+    let disc_hues = array<f32, 4>(0.00, 0.17, 0.50, 0.83);
+    let polar_hues = array<f32, 4>(0.08, 0.33, 0.66, 0.92);
+    let bulge_hues = array<f32, 4>(0.10, 0.28, 0.58, 0.88);
+    var family_hue = disc_hues[lineage];
     if (family < 0.05) {
-        family_hue = 0.70;
+        family_hue = bulge_hues[lineage];
     } else if (family < 0.75) {
-        family_hue = 0.63;
+        // The faint halo spans the spectrum by orbital-plane orientation.
+        // Angular momentum is phase-space state, not a position coordinate.
+        let plane_phase = atan2(
+            angular_momentum.z,
+            angular_momentum.x,
+        ) / TAU;
+        family_hue = fract(
+            0.52 +
+            plane_phase * 0.62 +
+            (random01(particle_index * 19u + 7u) - 0.5) * 0.12,
+        );
     } else if (family >= 0.93) {
-        family_hue = 0.06;
+        family_hue = polar_hues[lineage];
     }
     // Hue is phase-space information: orbital family, infall/ejection,
     // circularity, angular-momentum orientation, and recent excitation.
     // Absolute position does not participate.
     let hue = fract(
         family_hue +
-        radial_motion * 0.17 +
-        (1.0 - circularity) * 0.08 +
-        spin_signature * 0.055 +
-        excitation * 0.12,
+        radial_motion * 0.10 +
+        (1.0 - circularity) * 0.055 +
+        spin_signature * 0.03 +
+        excitation * 0.07 +
+        (random01(particle_index * 23u + 11u) - 0.5) * 0.035,
     );
     let spectral = rainbow(hue);
-    let heated = mix(
-        spectral,
-        vec3<f32>(1.0, 0.76, 0.30),
-        excitation * excitation * 0.48,
+    // Excitation lifts the particle's own spectrum instead of converging all
+    // hot material toward a shared blue, pink, or amber endpoint.
+    let heated = min(
+        vec3<f32>(1.0),
+        spectral * (0.82 + excitation * 0.42) +
+        vec3<f32>(excitation * excitation * 0.11),
+    );
+    var control_influence = 0.0;
+    var control_color = vec3<f32>(0.82, 1.0, 0.28);
+    if (render_params.control_point.w > 0.5) {
+        let control_delta = render_params.control_point.xyz - world;
+        let control_radius = max(render_params.control_settings.y, 0.02);
+        control_influence = exp(
+            -2.0 * dot(control_delta, control_delta) /
+            (control_radius * control_radius),
+        );
+        let mode = render_params.control_axis_mode.w;
+        if (mode > 1.5 && mode < 2.5) {
+            control_color = vec3<f32>(1.0, 0.38, 0.18);
+        } else if (mode >= 2.5) {
+            control_color = vec3<f32>(0.82, 0.34, 1.0);
+        }
+    }
+    let display_color = mix(
+        heated,
+        control_color,
+        control_influence * 0.68,
     );
 
     var out: VertexOutput;
@@ -748,11 +826,12 @@ fn render_vertex(
         1.0,
     );
     out.uv = corner;
-    out.color = heated;
+    out.color = display_color;
     out.depth_fade =
         clamp(0.62 + rotated.z * 0.25, 0.28, 1.0) *
         (0.76 + excitation * 0.48) *
-        luminosity;
+        luminosity *
+        (1.0 + control_influence * 0.72);
     return out;
 }
 

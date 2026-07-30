@@ -65,6 +65,20 @@ The Wasm module is dependency-free. Rust owns octree sizing, the bounded work
 model, public ABI, and the embedded WGSL payload. The browser module is a thin
 WebGPU command scheduler and UI layer.
 
+### Interactive shepherd
+
+Select a tool in the simulation deck, or press its number key:
+
+1. **Orbit** — drag the camera; the wheel zooms.
+2. **Pull** — hold and drag a localized attractor.
+3. **Push** — hold and drag a localized repulsor.
+4. **Vortex** — hold and drag to add angular momentum around the camera-facing
+   axis.
+
+Field force and radius are adjustable. Each active tool evaluates one smooth,
+bounded field per particle, so interaction adds O(N) work and does not alter
+the solver's asymptotic complexity.
+
 ## Memory at one million particles
 
 | Buffer | Approximate size |
@@ -89,9 +103,12 @@ sample independently from the simulated population.
 The seed uses a faint live spherical component as a self-consistent orbital
 backbone, plus a luminous four-arm disc and a counter-rotating polar annulus.
 The halo bodies move and contribute to gravity; their low luminosity prevents
-them from turning the view into fog. Particle color is derived from orbital
-family, angular momentum, infall/ejection, circularity, and a slowly decaying
-compression/excitation state. Absolute position is not a color input.
+them from turning the view into fog. The original four arms and the polar
+population each contain four persistent spectral lineages. Orbital-plane
+orientation, angular momentum, infall/ejection, circularity, and a slowly
+decaying compression/excitation state modify those colors. Excitation
+brightens the particle's own spectrum instead of converging toward one common
+hot color. Absolute position is not a color input.
 
 In local Playwright runs on 2026-07-30, Chromium exposed an AMD `rdna-2`
 adapter (but no model string). Queue-drained diagnostics measured 7.3 ms at a
@@ -99,8 +116,9 @@ adapter (but no model string). Queue-drained diagnostics measured 7.3 ms at a
 deliberately not queue-drained: a per-frame `onSubmittedWorkDone()` fence
 starved Firefox's submit/present pipeline. With that fence removed, the full
 million-particle loop held the test display's 60 Hz ceiling at 1280×720. A
-4,096-particle readback contained no non-finite values. These are measurements
-from one machine, not a portable RX 6800 guarantee.
+8,192-particle readback after exercising Pull, Push, and Vortex contained no
+non-finite values. These are measurements from one machine, not a portable RX
+6800 guarantee.
 
 ## Physics and energy
 
@@ -108,6 +126,11 @@ The force step is softened and approximate. Symplectic Euler keeps energy
 error bounded for a smooth Hamiltonian, but the p=1 cell approximation,
 density changes, and emergency escape boundary mean this demo does **not**
 claim exact energy conservation.
+
+Pull, Push, and Vortex are explicitly external fields. While held, the status
+line says `EXTERNAL WORK`: they deliberately exchange energy or angular
+momentum with the simulation. Releasing the pointer removes the field and
+returns to the unforced symplectic evolution.
 
 ### Optional a-life thought experiment
 

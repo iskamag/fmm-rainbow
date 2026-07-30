@@ -7,7 +7,7 @@
   <meta name="description" content="A million-body rainbow particle simulation using a sparse adaptive FMM in Rust, WebAssembly, and WebGPU.">
   <title>Rainbow FMM — One Million Bodies</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23d5ff47' stroke-width='3'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./style.css?v=live-halo-6">
+  <link rel="stylesheet" href="./style.css?v=control-spectrum-8">
 </head>
 <body>
   <main class="app-shell">
@@ -79,6 +79,26 @@
           <input id="glow" type="range" min="0.55" max="2.20" value="1.20" step="0.05">
         </label>
 
+        <div class="tool-field">
+          <span>Shepherd tool</span>
+          <div class="tool-row" role="group" aria-label="Particle interaction tool">
+            <button class="tool-button active" type="button" data-tool="orbit" aria-pressed="true">Orbit</button>
+            <button class="tool-button" type="button" data-tool="pull" aria-pressed="false">Pull</button>
+            <button class="tool-button" type="button" data-tool="push" aria-pressed="false">Push</button>
+            <button class="tool-button" type="button" data-tool="vortex" aria-pressed="false">Vortex</button>
+          </div>
+        </div>
+
+        <label class="field">
+          <span><b>Field force</b><output id="control-strength-value">0.70</output></span>
+          <input id="control-strength" type="range" min="0.10" max="1.80" value="0.70" step="0.05">
+        </label>
+
+        <label class="field">
+          <span><b>Field radius</b><output id="control-radius-value">0.22</output></span>
+          <input id="control-radius" type="range" min="0.06" max="0.48" value="0.22" step="0.01">
+        </label>
+
         <div class="button-row">
           <button id="toggle-run" class="primary-button" type="button">
             <span class="pause-icon" aria-hidden="true"></span>
@@ -100,7 +120,7 @@
       </ol>
       <div class="phase-note">
         <span>Color signal</span>
-        <b>orbit · shock · memory</b>
+        <b>lineage · orbit · shock</b>
       </div>
       <div class="complexity">
         <span>Asymptotic work</span>
@@ -108,8 +128,12 @@
       </div>
     </aside>
 
+    <div id="shepherd-cursor" class="shepherd-cursor" data-tool="pull" hidden aria-hidden="true">
+      <span></span>
+    </div>
+
     <footer class="footer-strip">
-      <div class="drag-hint"><span aria-hidden="true">↗</span> Drag to orbit · Wheel to zoom</div>
+      <div class="drag-hint"><span aria-hidden="true">↗</span><b id="interaction-hint">Drag to orbit · Wheel to zoom · Keys 1–4 select tools</b></div>
       <div class="gpu-readout"><span>GPU</span><b id="gpu-name">requesting adapter…</b></div>
       <div class="tree-readout"><span>OCTREE</span><b id="tree-stat">—</b></div>
       <button id="fullscreen" class="fullscreen-button" type="button" aria-label="Enter fullscreen">⌗</button>
@@ -122,6 +146,6 @@
     </section>
   </main>
 
-  <script type="module" src="./app.js?v=live-halo-6"></script>
+  <script type="module" src="./app.js?v=control-spectrum-8"></script>
 </body>
 </html>

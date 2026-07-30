@@ -1,4 +1,10 @@
 const $ = (selector) => document.querySelector(selector);
+const TOOL_MODES = Object.freeze({
+  orbit: 0,
+  pull: 1,
+  push: 2,
+  vortex: 3,
+});
 
 const ui = {
   canvas: $("#universe"),
@@ -11,6 +17,13 @@ const ui = {
   speedValue: $("#speed-value"),
   glow: $("#glow"),
   glowValue: $("#glow-value"),
+  controlStrength: $("#control-strength"),
+  controlStrengthValue: $("#control-strength-value"),
+  controlRadius: $("#control-radius"),
+  controlRadiusValue: $("#control-radius-value"),
+  toolButtons: [...document.querySelectorAll(".tool-button")],
+  shepherdCursor: $("#shepherd-cursor"),
+  interactionHint: $("#interaction-hint"),
   toggle: $("#toggle-run"),
   reseed: $("#reseed"),
   collapse: $("#collapse-controls"),
@@ -52,6 +65,14 @@ const state = {
   yaw: -0.18,
   pitch: -0.14,
   zoom: 1.95,
+  tool: "orbit",
+  controlActive: false,
+  controlPoint: [0, 0, 0],
+  controlAxis: [0, 0, 1],
+  pointerInside: false,
+  cursorX: 0,
+  cursorY: 0,
+  activePointerId: null,
   dragging: false,
   pointerX: 0,
   pointerY: 0,
@@ -61,7 +82,7 @@ const state = {
   submittedFrames: 0,
 };
 
-const PARAM_BYTES = 80;
+const PARAM_BYTES = 128;
 const PARAM_STRIDE = 256;
 const PARAM_SLOTS = 16;
 const PARTICLE_BYTES = 32;
@@ -126,6 +147,18 @@ function makeParams(level, upward = false, render = false) {
     ui.canvas.height,
     render ? 0.25 + Number(ui.glow.value) ** 2 * 0.75 : 0.84,
     render ? state.zoom : Number(ui.speed.value),
+    state.controlPoint[0],
+    state.controlPoint[1],
+    state.controlPoint[2],
+    state.controlActive && state.tool !== "orbit" ? 1 : 0,
+    state.controlAxis[0],
+    state.controlAxis[1],
+    state.controlAxis[2],
+    TOOL_MODES[state.tool] || 0,
+    Number(ui.controlStrength.value),
+    Number(ui.controlRadius.value),
+    0,
+    0,
   ];
   floats.forEach((value, index) => view.setFloat32(32 + index * 4, value, true));
   return data;
@@ -384,7 +417,7 @@ async function rebuildSimulation(requestedCount = state.count) {
 
     ui.particleStat.textContent = state.count.toLocaleString("en-US");
     ui.treeStat.textContent = `${state.cells.toLocaleString("en-US")} cells · ${state.renderCount.toLocaleString("en-US")} visible`;
-    ui.runState.textContent = state.running ? "SIMULATION LIVE" : "SIMULATION PAUSED";
+    refreshRunState(true);
     state.ready = true;
   } finally {
     state.rebuilding = false;
@@ -573,25 +606,140 @@ async function runOneSolverStep() {
   }
 }
 
+function inverseRotateCamera(point) {
+  const [x, y, z] = point;
+  const cp = Math.cos(state.pitch);
+  const sp = Math.sin(state.pitch);
+  const cy = Math.cos(state.yaw);
+  const sy = Math.sin(state.yaw);
+  const unpitchedY = cp * y + sp * z;
+  const unpitchedZ = -sp * y + cp * z;
+  return [
+    cy * x - sy * unpitchedZ,
+    unpitchedY,
+    sy * x + cy * unpitchedZ,
+  ];
+}
+
+function refreshRunState(force = false) {
+  if (state.rebuilding && !force) return;
+  if (!state.running) {
+    ui.runState.textContent = "SIMULATION PAUSED";
+  } else if (state.controlActive) {
+    ui.runState.textContent = `${state.tool.toUpperCase()} FIELD · EXTERNAL WORK`;
+  } else {
+    ui.runState.textContent = "SIMULATION LIVE";
+  }
+}
+
+function updateControlCursorSize() {
+  const diameter = Number(ui.controlRadius.value) *
+    1.92 / state.zoom * ui.canvas.clientHeight;
+  const size = Math.max(36, diameter);
+  ui.shepherdCursor.style.width = `${size}px`;
+  ui.shepherdCursor.style.height = `${size}px`;
+}
+
+function updateControlFromPointer(event) {
+  const rect = ui.canvas.getBoundingClientRect();
+  const shellRect = ui.canvas.parentElement.getBoundingClientRect();
+  const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+  const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+  state.cursorX = event.clientX - shellRect.left;
+  state.cursorY = event.clientY - shellRect.top;
+  ui.shepherdCursor.style.left = `${state.cursorX}px`;
+  ui.shepherdCursor.style.top = `${state.cursorY}px`;
+
+  const ndcX = x / Math.max(rect.width, 1) * 2 - 1;
+  const ndcY = 1 - y / Math.max(rect.height, 1) * 2;
+  const aspect = rect.width / Math.max(rect.height, 1);
+  const cameraPoint = [
+    ndcX * aspect * state.zoom / 1.92,
+    ndcY * state.zoom / 1.92,
+    0,
+  ];
+  state.controlPoint = inverseRotateCamera(cameraPoint)
+    .map((value) => Math.max(-0.95, Math.min(0.95, value)));
+  state.controlAxis = inverseRotateCamera([0, 0, 1]);
+}
+
+function setTool(tool) {
+  if (!(tool in TOOL_MODES)) return;
+  state.tool = tool;
+  state.controlActive = false;
+  state.dragging = false;
+  ui.toolButtons.forEach((button) => {
+    const active = button.dataset.tool === tool;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  ui.shepherdCursor.dataset.tool = tool;
+  ui.shepherdCursor.classList.remove("active");
+  ui.shepherdCursor.hidden = tool === "orbit" || !state.pointerInside;
+  const hints = {
+    orbit: "Drag to orbit · Wheel to zoom · Keys 1–4 select tools",
+    pull: "Hold and drag to attract · External work is explicit · Key 1 returns to orbit",
+    push: "Hold and drag to repel · External work is explicit · Key 1 returns to orbit",
+    vortex: "Hold and drag to spin · Adds angular momentum · Key 1 returns to orbit",
+  };
+  ui.interactionHint.textContent = hints[tool];
+  updateComputeParams();
+  refreshRunState();
+}
+
+function finishPointerInteraction(event) {
+  const wasControlling = state.controlActive;
+  state.dragging = false;
+  state.controlActive = false;
+  ui.shepherdCursor.classList.remove("active");
+  ui.shepherdCursor.hidden =
+    state.tool === "orbit" || !state.pointerInside;
+  if (
+    event &&
+    state.activePointerId !== null &&
+    ui.canvas.hasPointerCapture(state.activePointerId)
+  ) {
+    ui.canvas.releasePointerCapture(state.activePointerId);
+  }
+  state.activePointerId = null;
+  if (wasControlling) updateComputeParams();
+  refreshRunState();
+}
+
 function bindControls() {
   const syncOutputs = () => {
     ui.gravityValue.textContent = Number(ui.gravity.value).toFixed(2);
     ui.softeningValue.textContent = Number(ui.softening.value).toFixed(3);
     ui.speedValue.textContent = `${Number(ui.speed.value).toFixed(2)}×`;
     ui.glowValue.textContent = Number(ui.glow.value).toFixed(2);
+    ui.controlStrengthValue.textContent =
+      Number(ui.controlStrength.value).toFixed(2);
+    ui.controlRadiusValue.textContent =
+      Number(ui.controlRadius.value).toFixed(2);
+    updateControlCursorSize();
     updateComputeParams();
   };
-  [ui.gravity, ui.softening, ui.speed, ui.glow].forEach((input) => {
+  [
+    ui.gravity,
+    ui.softening,
+    ui.speed,
+    ui.glow,
+    ui.controlStrength,
+    ui.controlRadius,
+  ].forEach((input) => {
     input.addEventListener("input", syncOutputs);
   });
 
+  ui.toolButtons.forEach((button) => {
+    button.addEventListener("click", () => setTool(button.dataset.tool));
+  });
   ui.count.addEventListener("change", () => rebuildSimulation(Number(ui.count.value)).catch(showError));
   ui.reseed.addEventListener("click", () => rebuildSimulation(state.count).catch(showError));
   ui.toggle.addEventListener("click", () => {
     state.running = !state.running;
     ui.toggle.classList.toggle("paused", !state.running);
     ui.toggle.querySelector("span:last-child").textContent = state.running ? "Pause" : "Resume";
-    ui.runState.textContent = state.running ? "SIMULATION LIVE" : "SIMULATION PAUSED";
+    refreshRunState();
   });
   ui.collapse.addEventListener("click", () => {
     const collapsed = ui.deck.classList.toggle("collapsed");
@@ -604,27 +752,81 @@ function bindControls() {
   });
 
   ui.canvas.addEventListener("pointerdown", (event) => {
-    state.dragging = true;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    state.pointerInside = true;
+    state.activePointerId = event.pointerId;
     state.pointerX = event.clientX;
     state.pointerY = event.clientY;
+    updateControlFromPointer(event);
     ui.canvas.setPointerCapture(event.pointerId);
+    if (state.tool === "orbit") {
+      state.dragging = true;
+    } else {
+      state.controlActive = true;
+      ui.shepherdCursor.hidden = false;
+      ui.shepherdCursor.classList.add("active");
+      updateComputeParams();
+      refreshRunState();
+    }
   });
   ui.canvas.addEventListener("pointermove", (event) => {
-    if (!state.dragging) return;
-    state.yaw += (event.clientX - state.pointerX) * 0.005;
-    state.pitch = Math.max(-1.1, Math.min(1.1, state.pitch + (event.clientY - state.pointerY) * 0.004));
-    state.pointerX = event.clientX;
-    state.pointerY = event.clientY;
+    if (state.tool !== "orbit") {
+      updateControlFromPointer(event);
+      ui.shepherdCursor.hidden = false;
+      if (state.controlActive) updateComputeParams();
+    } else if (state.dragging) {
+      state.yaw += (event.clientX - state.pointerX) * 0.005;
+      state.pitch = Math.max(
+        -1.1,
+        Math.min(
+          1.1,
+          state.pitch + (event.clientY - state.pointerY) * 0.004,
+        ),
+      );
+      state.pointerX = event.clientX;
+      state.pointerY = event.clientY;
+    }
   });
-  ui.canvas.addEventListener("pointerup", () => { state.dragging = false; });
-  ui.canvas.addEventListener("pointercancel", () => { state.dragging = false; });
+  ui.canvas.addEventListener("pointerenter", (event) => {
+    state.pointerInside = true;
+    if (state.tool !== "orbit") {
+      updateControlFromPointer(event);
+      ui.shepherdCursor.hidden = false;
+    }
+  });
+  ui.canvas.addEventListener("pointerleave", () => {
+    state.pointerInside = false;
+    if (!state.controlActive) ui.shepherdCursor.hidden = true;
+  });
+  ui.canvas.addEventListener("pointerup", finishPointerInteraction);
+  ui.canvas.addEventListener("pointercancel", finishPointerInteraction);
   ui.canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     state.zoom = Math.max(1.55, Math.min(3.65, state.zoom + event.deltaY * 0.0014));
+    updateControlCursorSize();
   }, { passive: false });
 
-  window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("keydown", (event) => {
+    if (event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLSelectElement) {
+      return;
+    }
+    const tool = {
+      Digit1: "orbit",
+      Digit2: "pull",
+      Digit3: "push",
+      Digit4: "vortex",
+    }[event.code];
+    if (tool) setTool(tool);
+  });
+  window.addEventListener("blur", () => finishPointerInteraction());
+  window.addEventListener("resize", () => {
+    resizeCanvas();
+    updateControlCursorSize();
+  });
   syncOutputs();
+  setTool("orbit");
 }
 
 function showError(error) {
@@ -651,7 +853,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=live-halo-6");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=control-spectrum-8");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }

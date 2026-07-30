@@ -832,15 +832,15 @@ fn resolve_vertex(
 }
 
 fn reconstruct_field(uv: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
-    let dimensions = vec2<f32>(textureDimensions(accumulation_texture));
-    let size_control = clamp(
-        (render_params.point_size - 0.4) / 1.8,
-        0.0,
-        1.0,
+    // point_size is the requested outer Gaussian radius in final-canvas
+    // pixels. The furthest optimized tap lands exactly at that radius.
+    let output_dimensions = vec2<f32>(
+        render_params.viewport_width,
+        render_params.viewport_height,
     );
     let step = axis *
-        mix(0.75, 1.25, size_control) /
-        dimensions;
+        max(render_params.point_size, 1.0) /
+        (output_dimensions * 3.230769);
     var field = textureSample(
         accumulation_texture, accumulation_sampler, uv,
     ) * 0.227027;
@@ -911,7 +911,7 @@ fn resolve_fragment(
         vec3<f32>(0.0),
         mix(vec3<f32>(luma), average, 1.16),
     );
-    let density = sqrt(accumulated.a / (accumulated.a + 2.0));
+    let density = sqrt(accumulated.a / (accumulated.a + 1.0));
     let mapped = vec3<f32>(1.0) - exp(-vivid * density * 1.58);
     let display = pow(clamp(mapped + background, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.82));
     return vec4<f32>(display, 1.0);

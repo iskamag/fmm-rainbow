@@ -95,7 +95,7 @@ const PARTICLE_BYTES = 32;
 const MOMENT_BYTES = 16;
 const FIELD_BYTES = 48;
 const ACCUMULATION_FORMAT = "rgba16float";
-const ACCUMULATION_SCALE = 0.25;
+const ACCUMULATION_SCALE = 0.5;
 
 async function instantiateWasm(url) {
   const response = await fetch(url);
@@ -153,7 +153,7 @@ function makeParams(level, upward = false, render = false) {
     state.pitch,
     ui.canvas.width,
     ui.canvas.height,
-    render ? 0.25 + Number(ui.glow.value) ** 2 * 0.75 : 0.84,
+    render ? 1.0 : 0.84,
     render ? state.zoom : Number(ui.speed.value),
     state.controlPoint[0],
     state.controlPoint[1],
@@ -863,7 +863,7 @@ function bindControls() {
     ui.gravityValue.textContent = Number(ui.gravity.value).toFixed(2);
     ui.softeningValue.textContent = Number(ui.softening.value).toFixed(3);
     ui.speedValue.textContent = `${Number(ui.speed.value).toFixed(2)}×`;
-    ui.glowValue.textContent = Number(ui.glow.value).toFixed(2);
+    ui.glowValue.textContent = `${Number(ui.glow.value).toFixed(1)} px`;
     ui.controlStrengthValue.textContent =
       Number(ui.controlStrength.value).toFixed(2);
     ui.controlRadiusValue.textContent =
@@ -1005,7 +1005,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=gradient-hdr-18");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=gradient-core-19");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }

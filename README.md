@@ -86,9 +86,9 @@ the solver's asymptotic complexity.
 | Positions, dynamical hue, velocities, excitation | 32 MiB |
 | 299,593 fixed-point cell moments | 4.6 MiB |
 | Acceleration + tidal local fields | 13.7 MiB |
-| Quarter-scale HDR field + blur target at 1080p | about 2 MiB |
+| Half-scale HDR field + blur target at 1080p | about 8 MiB |
 | Uniform plans and overhead | < 1 MiB |
-| **Solver + visual field total** | **about 53 MiB** |
+| **Solver + visual field total** | **about 59 MiB** |
 
 This leaves substantial headroom in a 16 GiB RX 6800 for the browser,
 swapchain, and driver allocations. Actual frame rate depends on browser,
@@ -96,12 +96,15 @@ resolution, clock/power limits, and particle distribution; use the live frame
 readout rather than treating a build-time estimate as a benchmark.
 
 All 1,048,576 bodies participate in both the force solve and the visual pass.
-Each body makes one additive deposit into a quarter-scale `rgba16float`
+Each body makes one additive deposit into a half-scale `rgba16float`
 color-and-density field. A fixed horizontal/vertical Gaussian reconstruction
 then expands that compact field into large, smooth gradients. The fullscreen
 resolve divides accumulated color by accumulated density before tone mapping,
 so overlap increases presence without bleaching every structure into fog. No
 visual subsample is hidden; the footer reports the full visible population.
+The **Gradient radius** control is expressed in final-canvas pixels and changes
+only the reconstruction radius; it no longer changes exposure at the same
+time.
 
 The seed uses a faint live spherical component as a self-consistent orbital
 backbone, plus a luminous four-arm disc and a counter-rotating polar annulus.
@@ -114,10 +117,11 @@ flow around an orbit rather than discrete lane colors. Absolute position is
 not a color input.
 
 In local Playwright runs on 2026-07-30, Chromium exposed an AMD `rdna-2`
-adapter (but no model string). The current million-deposit HDR build reported
-roughly 50–53 FPS at a 1920×1080 viewport with a 1885×1060 internal canvas;
-the exact result varied with evolution and browser scheduling. The live frame
-loop is deliberately not queue-drained: a per-frame
+adapter (but no model string). With one clean browser process, the current
+million-deposit HDR build held 60 FPS at both 12 and 30 seconds in a 1920×1080
+viewport with a 1885×1060 internal canvas. Earlier 50–53 FPS readings were
+contaminated by Chrome processes left alive between Playwright runs. The live
+frame loop is deliberately not queue-drained: a per-frame
 `onSubmittedWorkDone()` fence starved Firefox's submit/present pipeline. A
 8,192-particle readback after exercising Pull, Push, and Vortex contained no
 non-finite values. These are measurements from one machine, not a portable RX

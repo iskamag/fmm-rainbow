@@ -39,6 +39,9 @@ const ui = {
   errorMessage: $("#error-message"),
 };
 
+const BASE_DT = 0.0009;
+const REFERENCE_FRAME_MS = 1000 / 60;
+
 const state = {
   wasm: null,
   shader: "",
@@ -84,6 +87,7 @@ const state = {
   pointerY: 0,
   elapsed: 0,
   frameSamples: [],
+  frameDt: BASE_DT,
   lastFrameAt: performance.now(),
   submittedFrames: 0,
 };
@@ -143,7 +147,7 @@ function makeParams(level, upward = false, render = false) {
   uints.forEach((value, index) => view.setUint32(index * 4, value, true));
 
   const floats = [
-    render ? Math.cos(state.yaw) : 0.0009,
+    render ? Math.cos(state.yaw) : state.frameDt,
     render ? Math.sin(state.yaw) : Number(ui.gravity.value),
     render ? Math.cos(state.pitch) : Number(ui.softening.value),
     Number(ui.glow.value),
@@ -532,6 +536,7 @@ async function rebuildSimulation(requestedCount = state.count) {
 }
 
 function encodeSolver(encoder) {
+  updateComputeParams();
   const pass = encoder.beginComputePass({ label: "Linear FMM solve" });
 
   pass.setPipeline(state.pipelines.clear_cells);
@@ -636,6 +641,7 @@ function frame(now) {
     const frameInterval = Math.min(100, now - state.lastFrameAt);
     state.lastFrameAt = now;
     state.elapsed += frameInterval * 0.001;
+    state.frameDt = BASE_DT * (frameInterval / REFERENCE_FRAME_MS);
 
     if (state.ready) {
       const encoder = state.device.createCommandEncoder({ label: "Rainbow FMM frame" });

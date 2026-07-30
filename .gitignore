@@ -1,0 +1,6 @@
+/target/
+/.playwright/*.png
+/.playwright/*.webm
+
+.playwright-cli
+pkg/rainbow_fmm.wasm

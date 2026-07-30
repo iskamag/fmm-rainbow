@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050608">
+  <meta name="description" content="A million-body rainbow particle simulation using a sparse adaptive FMM in Rust, WebAssembly, and WebGPU.">
+  <title>Rainbow FMM — One Million Bodies</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23d5ff47' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css?v=firefox-pipeline-3">
+</head>
+<body>
+  <main class="app-shell">
+    <canvas id="universe" aria-label="Interactive rainbow n-body simulation"></canvas>
+    <div class="vignette" aria-hidden="true"></div>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Rainbow FMM home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>
+          <strong>Rainbow</strong>
+          <small>FMM / WebGPU</small>
+        </span>
+      </a>
+
+      <div class="solver-state" role="status" aria-live="polite">
+        <span class="live-dot"></span>
+        <span id="run-state">INITIALIZING GPU</span>
+      </div>
+
+      <div class="top-stats" aria-label="Live simulation statistics">
+        <div><span id="particle-stat">—</span><small>particles</small></div>
+        <div><span id="fps-stat">—</span><small>frames / sec</small></div>
+        <div><span id="frame-stat">—</span><small>frame time</small></div>
+      </div>
+    </header>
+
+    <section class="hero-copy" aria-labelledby="hero-title">
+      <p class="eyebrow">Linear complexity. Celestial scale.</p>
+      <h1 id="hero-title">One million<br><em>bodies.</em></h1>
+      <p class="dek">A living gravity field, reduced from a trillion pairwise pulls to a sparse hierarchy of local conversations.</p>
+    </section>
+
+    <aside class="control-deck" aria-label="Simulation controls">
+      <div class="deck-heading">
+        <span>Simulation</span>
+        <button id="collapse-controls" class="icon-button" type="button" aria-label="Collapse controls" aria-expanded="true">−</button>
+      </div>
+
+      <div class="deck-body">
+        <label class="field select-field">
+          <span>Particle budget</span>
+          <select id="particle-count">
+            <option value="131072">131,072 · quiet</option>
+            <option value="262144">262,144 · balanced</option>
+            <option value="524288">524,288 · dense</option>
+            <option value="1048576" selected>1,048,576 · RX 6800</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span><b>Gravity</b><output id="gravity-value">0.34</output></span>
+          <input id="gravity" type="range" min="0.08" max="0.72" value="0.34" step="0.01">
+        </label>
+
+        <label class="field">
+          <span><b>Softening</b><output id="softening-value">0.012</output></span>
+          <input id="softening" type="range" min="0.004" max="0.032" value="0.012" step="0.001">
+        </label>
+
+        <label class="field">
+          <span><b>Time scale</b><output id="speed-value">1.00×</output></span>
+          <input id="speed" type="range" min="0.10" max="2.00" value="1.00" step="0.05">
+        </label>
+
+        <label class="field">
+          <span><b>Glow / size</b><output id="glow-value">1.20</output></span>
+          <input id="glow" type="range" min="0.55" max="2.20" value="1.20" step="0.05">
+        </label>
+
+        <div class="button-row">
+          <button id="toggle-run" class="primary-button" type="button">
+            <span class="pause-icon" aria-hidden="true"></span>
+            <span>Pause</span>
+          </button>
+          <button id="reseed" class="secondary-button" type="button">Reseed</button>
+        </div>
+      </div>
+    </aside>
+
+    <aside class="method-card" aria-labelledby="method-title">
+      <div class="method-kicker">Method / 01</div>
+      <h2 id="method-title">Adaptive sparse FMM</h2>
+      <ol>
+        <li><span>01</span><p><b>P2M deposit</b><small>Particles → occupied leaves</small></p></li>
+        <li><span>02</span><p><b>Upward pass</b><small>Eight children → monopole</small></p></li>
+        <li><span>03</span><p><b>M2L field</b><small>189 bounded interactions</small></p></li>
+        <li><span>04</span><p><b>Downward pass</b><small>Local field → particles</small></p></li>
+      </ol>
+      <div class="complexity">
+        <span>Asymptotic work</span>
+        <strong>O(N)</strong>
+      </div>
+    </aside>
+
+    <footer class="footer-strip">
+      <div class="drag-hint"><span aria-hidden="true">↗</span> Drag to orbit · Wheel to zoom</div>
+      <div class="gpu-readout"><span>GPU</span><b id="gpu-name">requesting adapter…</b></div>
+      <div class="tree-readout"><span>OCTREE</span><b id="tree-stat">—</b></div>
+      <button id="fullscreen" class="fullscreen-button" type="button" aria-label="Enter fullscreen">⌗</button>
+    </footer>
+
+    <section id="error-panel" class="error-panel" hidden role="alert">
+      <p class="eyebrow">WebGPU unavailable</p>
+      <h2>The gravity engine could not start.</h2>
+      <p id="error-message">Use a current Chromium build with WebGPU enabled.</p>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js?v=firefox-pipeline-3"></script>
+</body>
+</html>

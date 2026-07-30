@@ -1,0 +1,14 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "channel": "chromium",
+      "args": [
+        "--enable-unsafe-webgpu",
+        "--use-angle=vulkan",
+        "--enable-features=Vulkan",
+        "--disable-vulkan-surface"
+      ]
+    }
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "rainbow-fmm"
+version = "0.1.0"
+edition = "2021"
+description = "A million-particle adaptive sparse FMM planned in Rust and executed with WebGPU"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+

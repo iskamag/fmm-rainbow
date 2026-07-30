@@ -51,7 +51,7 @@ const state = {
   rebuilding: false,
   yaw: -0.18,
   pitch: -0.14,
-  zoom: 2.32,
+  zoom: 1.95,
   dragging: false,
   pointerX: 0,
   pointerY: 0,
@@ -337,7 +337,7 @@ async function rebuildSimulation(requestedCount = state.count) {
     const usage = GPUBufferUsage;
     state.buffers = {
       particles: createBuffer(
-        "Particles: position/mass + velocity/hue",
+        "Particles: position/luminosity + velocity/excitation",
         state.count * PARTICLE_BYTES,
         usage.STORAGE | usage.COPY_DST | usage.COPY_SRC,
       ),
@@ -427,12 +427,12 @@ function encodeSolver(encoder) {
   pass.end();
 }
 
-function encodeRender(encoder) {
+function encodeRender(encoder, targetView = null) {
   updateRenderParams();
   const pass = encoder.beginRenderPass({
     label: "Rainbow particle field",
     colorAttachments: [{
-      view: state.context.getCurrentTexture().createView(),
+      view: targetView || state.context.getCurrentTexture().createView(),
       clearValue: { r: 0.012, g: 0.014, b: 0.019, a: 1 },
       loadOp: "clear",
       storeOp: "store",
@@ -471,6 +471,86 @@ function frame(now) {
     requestAnimationFrame(frame);
   } catch (error) {
     showError(error);
+  }
+}
+
+async function captureRenderFrame() {
+  if (!state.ready || state.rebuilding) {
+    throw new Error("Simulation is not ready for a render capture.");
+  }
+  const wasReady = state.ready;
+  state.ready = false;
+  let texture;
+  let readback;
+  try {
+    await state.device.queue.onSubmittedWorkDone();
+    const width = ui.canvas.width;
+    const height = ui.canvas.height;
+    const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+    texture = state.device.createTexture({
+      label: "Diagnostic render target",
+      size: [width, height],
+      format: state.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    readback = state.device.createBuffer({
+      label: "Diagnostic render readback",
+      size: bytesPerRow * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    const encoder = state.device.createCommandEncoder({
+      label: "Diagnostic render capture",
+    });
+    encodeRender(encoder, texture.createView());
+    encoder.copyTextureToBuffer(
+      { texture },
+      { buffer: readback, bytesPerRow, rowsPerImage: height },
+      [width, height],
+    );
+    state.device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+
+    const source = new Uint8Array(readback.getMappedRange());
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    const bgra = state.format.startsWith("bgra");
+    for (let y = 0; y < height; y += 1) {
+      const sourceRow = y * bytesPerRow;
+      const targetRow = y * width * 4;
+      for (let x = 0; x < width; x += 1) {
+        const sourcePixel = sourceRow + x * 4;
+        const targetPixel = targetRow + x * 4;
+        rgba[targetPixel] = source[sourcePixel + (bgra ? 2 : 0)];
+        rgba[targetPixel + 1] = source[sourcePixel + 1];
+        rgba[targetPixel + 2] = source[sourcePixel + (bgra ? 0 : 2)];
+        rgba[targetPixel + 3] = source[sourcePixel + 3];
+      }
+    }
+
+    document.querySelector("#gpu-readback")?.remove();
+    const capture = document.createElement("canvas");
+    capture.id = "gpu-readback";
+    capture.width = width;
+    capture.height = height;
+    capture.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "z-index:1000",
+      "max-width:100vw",
+      "max-height:100vh",
+    ].join(";");
+    capture.getContext("2d").putImageData(
+      new ImageData(rgba, width, height),
+      0,
+      0,
+    );
+    document.body.append(capture);
+    return { width, height, selector: "#gpu-readback" };
+  } finally {
+    if (readback?.mapState === "mapped") readback.unmap();
+    readback?.destroy();
+    texture?.destroy();
+    state.ready = wasReady;
   }
 }
 
@@ -571,7 +651,7 @@ async function main() {
       ui.toggle.querySelector("span:last-child").textContent = "Resume";
     }
     state.count = Number(ui.count.value);
-    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=visibility-perf-2");
+    state.wasm = await instantiateWasm("./pkg/rainbow_fmm.wasm?v=live-halo-6");
     if (state.wasm.exports.rainbow_api_version() !== 1) {
       throw new Error("Rust/Wasm API version mismatch.");
     }
@@ -603,6 +683,7 @@ async function main() {
     await createPipelines();
     await rebuildSimulation(state.count);
     state.runOneSolverStep = runOneSolverStep;
+    state.captureRenderFrame = captureRenderFrame;
     window.__rainbowDiagnostics = state;
     state.lastFrameAt = performance.now();
     requestAnimationFrame(frame);

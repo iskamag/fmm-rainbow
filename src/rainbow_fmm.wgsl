@@ -38,7 +38,9 @@ struct Params {
 }
 
 struct Particle {
-    pos_mass: vec4<f32>,
+    // xyz = position; w = luminosity. Dynamical mass is equal and implicit.
+    pos_light: vec4<f32>,
+    // xyz = velocity; w = slowly decaying dynamical excitation.
     vel_hue: vec4<f32>,
 }
 
@@ -182,6 +184,22 @@ fn random01(seed: u32) -> f32 {
     return f32(hash32(seed)) * (1.0 / 4294967296.0);
 }
 
+fn seeded_enclosed_mass(radius: f32) -> f32 {
+    // The seeded population is 5% compact bulge, 70% uniform live halo,
+    // 18% luminous disc, and 7% polar annulus.
+    let bulge = 0.05 * pow(clamp(radius / 0.11, 0.0, 1.0), 3.0);
+    let halo = 0.70 * pow(clamp(radius / 0.70, 0.0, 1.0), 3.0);
+    let disc = 0.18 * pow(
+        clamp((radius - 0.055) / 0.60, 0.0, 1.0),
+        1.0 / 0.72,
+    );
+    let polar = 0.07 * pow(
+        clamp((radius - 0.22) / 0.31, 0.0, 1.0),
+        1.0 / 0.86,
+    );
+    return max(bulge + halo + disc + polar, 0.0001);
+}
+
 @compute @workgroup_size(256)
 fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -197,47 +215,115 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let u5 = random01(i * 11u + 6u);
     var pos: vec3<f32>;
     var vel: vec3<f32>;
-    var hue: f32;
+    var excitation: f32;
+    var luminosity: f32;
 
-    if (u5 < 0.003) {
-        // A faint spherical halo makes the 3D camera motion legible.
+    if (u5 < 0.75) {
+        // A live spherical mass component is the orbital backbone. Every halo
+        // body still moves and contributes to FMM gravity, but is deliberately
+        // faint so the stabilizer does not become a visual fog.
         let z = u0 * 2.0 - 1.0;
         let phi = TAU * u1;
-        let radius = 0.78 * pow(u2, 0.3333333);
+        let outer_radius = select(0.70, 0.11, u5 < 0.05);
+        let radius = outer_radius * pow(u2, 0.3333333);
         let ring = sqrt(max(0.0, 1.0 - z * z));
-        pos = radius * vec3<f32>(ring * cos(phi), z * 0.58, ring * sin(phi));
-        vel = 0.035 * vec3<f32>(-pos.z, 0.0, pos.x);
-        hue = fract(0.58 + 0.18 * z + u3 * 0.08);
-    } else {
-        // Four narrow logarithmic ribbons: dense enough to glow at a million
-        // bodies, but separated enough to read as structure rather than fog.
-        let radius = 0.055 + 0.61 * pow(u0, 0.72);
+        let radial_direction = vec3<f32>(
+            ring * cos(phi),
+            z,
+            ring * sin(phi),
+        );
+        pos = radius * radial_direction;
+
+        let tangent_z = u3 * 2.0 - 1.0;
+        let tangent_phi = TAU * u4;
+        let tangent_ring = sqrt(max(0.0, 1.0 - tangent_z * tangent_z));
+        let random_direction = vec3<f32>(
+            tangent_ring * cos(tangent_phi),
+            tangent_z,
+            tangent_ring * sin(tangent_phi),
+        );
+        var tangent = cross(radial_direction, random_direction);
+        if (length(tangent) < 0.001) {
+            tangent = cross(radial_direction, vec3<f32>(0.0, 1.0, 0.0));
+        }
+        if (length(tangent) < 0.001) {
+            tangent = cross(radial_direction, vec3<f32>(1.0, 0.0, 0.0));
+        }
+        let orbital = 0.985 * sqrt(
+            params.gravity * seeded_enclosed_mass(radius) / (radius + 0.018),
+        );
+        vel = orbital * normalize(tangent);
+        excitation = select(0.025 + u4 * 0.025, 0.09, u5 < 0.05);
+        luminosity = select(0.032, 0.10, u5 < 0.05);
+    } else if (u5 < 0.93) {
+        // A luminous four-arm tracer disc. The halo-dominated rotation curve
+        // has much less differential shear, so its density waves survive.
+        let radius = 0.055 + 0.60 * pow(u0, 0.72);
         let arm = f32(i & 3u) * (TAU / 4.0);
-        let angle = arm + radius * 8.2 + (u1 - 0.5) * 0.055;
-        let thickness = (u2 + u3 + u4 - 1.5) * (0.004 + radius * 0.012);
+        let angle = arm + radius * 7.8 +
+            (u1 - 0.5) * (0.045 + radius * 0.055);
+        let thickness = (u2 + u3 + u4 - 1.5) *
+            (0.0035 + radius * 0.010);
         let flat = vec3<f32>(
             radius * cos(angle),
             radius * sin(angle) * 0.72,
             thickness,
         );
-        let tilt = 0.24;
+        let tilt = 0.20;
         pos = vec3<f32>(
             flat.x,
             flat.y * cos(tilt) - flat.z * sin(tilt),
             flat.y * sin(tilt) + flat.z * cos(tilt),
         );
 
-        let orbital = 0.105 / sqrt(radius + 0.055);
-        vel = orbital * vec3<f32>(
+        let orbital = 0.99 * sqrt(
+            params.gravity * seeded_enclosed_mass(radius) / (radius + 0.018),
+        );
+        let tangent = vec3<f32>(
             -sin(angle),
             cos(angle) * 0.72 * cos(tilt),
             cos(angle) * 0.72 * sin(tilt),
         );
-        hue = fract(0.03 + radius * 1.45);
+        let radial = normalize(pos) * orbital * 0.035 *
+            sin(angle * 3.0 - radius * 13.0);
+        vel = orbital * normalize(tangent) + radial;
+        excitation = 0.08 + u3 * 0.05;
+        luminosity = 0.95 + u4 * 0.10;
+    } else {
+        // A retrograde polar annulus repeatedly crosses the main disc at two
+        // nodes. It supplies persistent caustics and braided streams without
+        // injecting energy after initialization.
+        let radius = 0.22 + 0.31 * pow(u0, 0.86);
+        let angle = TAU * u1 + radius * 3.5;
+        let thickness = (u2 + u3 + u4 - 1.5) *
+            (0.004 + radius * 0.009);
+        let flat = vec3<f32>(
+            radius * cos(angle),
+            thickness,
+            radius * sin(angle),
+        );
+        let tilt = 0.30;
+        pos = vec3<f32>(
+            flat.x * cos(tilt) - flat.y * sin(tilt),
+            flat.x * sin(tilt) + flat.y * cos(tilt),
+            flat.z,
+        );
+
+        let tangent = vec3<f32>(
+            -sin(angle) * cos(tilt),
+            -sin(angle) * sin(tilt),
+            cos(angle),
+        );
+        let orbital = 0.99 * sqrt(
+            params.gravity * seeded_enclosed_mass(radius) / (radius + 0.018),
+        );
+        vel = -orbital * normalize(tangent);
+        excitation = 0.20 + u4 * 0.08;
+        luminosity = 1.16 + u3 * 0.12;
     }
 
-    particles[i].pos_mass = vec4<f32>(pos, 1.0 / f32(params.particle_count));
-    particles[i].vel_hue = vec4<f32>(vel, hue);
+    particles[i].pos_light = vec4<f32>(pos, luminosity);
+    particles[i].vel_hue = vec4<f32>(vel, excitation);
 }
 
 @compute @workgroup_size(256)
@@ -259,7 +345,7 @@ fn deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= params.particle_count) {
         return;
     }
-    let pos = particles[i].pos_mass.xyz;
+    let pos = particles[i].pos_light.xyz;
     let c = position_cell(pos, params.level_dim);
     let cell = params.level_offset + linear_index(c, params.level_dim);
     atomicAdd(&moments[cell].count, 1u);
@@ -437,7 +523,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var particle = particles[i];
-    var pos = particle.pos_mass.xyz;
+    var pos = particle.pos_light.xyz;
     var velocity = particle.vel_hue.xyz;
     // Descend only while the local density requires it. This selects a true
     // non-uniform leaf per particle without a serial tree walk or dynamic
@@ -476,6 +562,40 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     // One-force symplectic Euler: unlike explicit Euler, energy error remains
     // bounded for the smooth Hamiltonian used by the visual simulation.
     let dt = params.dt * params.speed;
+    let radius = max(length(pos), 0.0001);
+    let velocity_length = max(length(velocity), 0.0001);
+    let radial_fraction = abs(
+        dot(pos, velocity) / (radius * velocity_length),
+    );
+    let radial_shock = radial_fraction * radial_fraction * radial_fraction;
+    let density_pulse = clamp(
+        (f32(count) - f32(ADAPTIVE_LEAF_CAPACITY)) / 72.0,
+        0.0,
+        1.0,
+    );
+    let field_strength = clamp(
+        length(acceleration) * (radius + 0.12) * 0.58,
+        0.0,
+        1.0,
+    );
+    let target_excitation = clamp(
+        0.025 +
+        radial_shock * 0.56 +
+        density_pulse * 0.26 +
+        field_strength * 0.13,
+        0.0,
+        1.0,
+    );
+    var excitation = particle.vel_hue.w;
+    // Compression and radial shocks light up quickly; the state cools slowly,
+    // leaving a short physical memory instead of coloring absolute position.
+    let response = select(1.05, 10.0, target_excitation > excitation);
+    excitation = mix(
+        excitation,
+        target_excitation,
+        clamp(dt * response, 0.0, 1.0),
+    );
+
     velocity += acceleration * dt;
     pos += velocity * dt;
 
@@ -488,8 +608,8 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    particle.pos_mass = vec4<f32>(pos, particle.pos_mass.w);
-    particle.vel_hue = vec4<f32>(velocity, particle.vel_hue.w);
+    particle.pos_light = vec4<f32>(pos, particle.pos_light.w);
+    particle.vel_hue = vec4<f32>(velocity, excitation);
     particles[i] = particle;
 }
 
@@ -536,7 +656,7 @@ fn render_vertex(
     ) % render_params.particle_count;
     let particle = render_particles[particle_index];
     let rotated = rotate_camera(
-        particle.pos_mass.xyz,
+        particle.pos_light.xyz,
         render_params.camera_yaw,
         render_params.camera_pitch,
     );
@@ -546,23 +666,93 @@ fn render_vertex(
         rotated.x * perspective / render_params.aspect,
         rotated.y * perspective,
     );
-    let velocity = length(particle.vel_hue.xyz);
-    let depth_size = clamp(perspective * 0.72, 0.48, 1.35);
-    let size = render_params.point_size * depth_size * (0.9 + min(velocity, 0.5) * 0.7);
-    let corner = corners[vertex_index];
-    let pixel = vec2<f32>(
-        2.0 * size / render_params.viewport_width,
-        2.0 * size / render_params.viewport_height,
+    let world = particle.pos_light.xyz;
+    let world_velocity = particle.vel_hue.xyz;
+    let view_velocity = rotate_camera(
+        world_velocity,
+        render_params.camera_yaw,
+        render_params.camera_pitch,
     );
-    let world = particle.pos_mass.xyz;
-    let spatial_phase = atan2(world.y, world.x) / TAU + length(world) * 0.31;
-    let hue = fract(0.54 + spatial_phase + velocity * 0.035 + render_params.time * 0.0015);
+    let velocity = length(world_velocity);
+    let excitation = clamp(particle.vel_hue.w, 0.0, 1.0);
+    let luminosity = clamp(particle.pos_light.w, 0.0, 1.3);
+    let depth_size = clamp(perspective * 0.72, 0.48, 1.35);
+    let size = render_params.point_size * depth_size *
+        (0.78 + min(velocity, 0.9) * 0.34 + excitation * 0.58) *
+        mix(0.38, 1.05, sqrt(min(luminosity, 1.0)));
+    let corner = corners[vertex_index];
+    let screen_speed = length(view_velocity.xy);
+    var streak_direction = vec2<f32>(1.0, 0.0);
+    if (screen_speed > 0.00001) {
+        streak_direction = view_velocity.xy / screen_speed;
+    }
+    let streak_normal = vec2<f32>(
+        -streak_direction.y,
+        streak_direction.x,
+    );
+    let stretch = 1.0 + min(velocity * 2.8, 2.4) *
+        (0.28 + excitation * 0.72);
+    let local_pixels =
+        streak_direction * (corner.x * size * stretch) +
+        streak_normal * (corner.y * size);
+    let clip_offset = vec2<f32>(
+        2.0 * local_pixels.x / render_params.viewport_width,
+        2.0 * local_pixels.y / render_params.viewport_height,
+    );
+
+    let radius = max(length(world), 0.0001);
+    let speed = max(velocity, 0.0001);
+    let radial_motion = clamp(
+        dot(world, world_velocity) / (radius * speed),
+        -1.0,
+        1.0,
+    );
+    let angular_momentum = cross(world, world_velocity);
+    let circularity = clamp(
+        length(angular_momentum) / (radius * speed),
+        0.0,
+        1.0,
+    );
+    let spin_signature = angular_momentum.y /
+        max(length(angular_momentum), 0.0001);
+    let family = random01(particle_index * 11u + 6u);
+    var family_hue = 0.56;
+    if (family < 0.05) {
+        family_hue = 0.70;
+    } else if (family < 0.75) {
+        family_hue = 0.63;
+    } else if (family >= 0.93) {
+        family_hue = 0.06;
+    }
+    // Hue is phase-space information: orbital family, infall/ejection,
+    // circularity, angular-momentum orientation, and recent excitation.
+    // Absolute position does not participate.
+    let hue = fract(
+        family_hue +
+        radial_motion * 0.17 +
+        (1.0 - circularity) * 0.08 +
+        spin_signature * 0.055 +
+        excitation * 0.12,
+    );
+    let spectral = rainbow(hue);
+    let heated = mix(
+        spectral,
+        vec3<f32>(1.0, 0.76, 0.30),
+        excitation * excitation * 0.48,
+    );
 
     var out: VertexOutput;
-    out.position = vec4<f32>(center + corner * pixel, 0.46 + rotated.z * 0.08, 1.0);
+    out.position = vec4<f32>(
+        center + clip_offset,
+        0.46 + rotated.z * 0.08,
+        1.0,
+    );
     out.uv = corner;
-    out.color = rainbow(hue);
-    out.depth_fade = clamp(0.62 + rotated.z * 0.25, 0.28, 1.0);
+    out.color = heated;
+    out.depth_fade =
+        clamp(0.62 + rotated.z * 0.25, 0.28, 1.0) *
+        (0.76 + excitation * 0.48) *
+        luminosity;
     return out;
 }
 

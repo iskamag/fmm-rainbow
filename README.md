@@ -69,7 +69,7 @@ WebGPU command scheduler and UI layer.
 
 | Buffer | Approximate size |
 |---|---:|
-| Positions, masses, velocities, hue | 32 MiB |
+| Positions, luminosity, velocities, excitation | 32 MiB |
 | 299,593 fixed-point cell moments | 4.6 MiB |
 | Acceleration + tidal local fields | 13.7 MiB |
 | Uniform plans and overhead | < 1 MiB |
@@ -85,6 +85,13 @@ deterministically distributed 262,144-body sample and caps its internal canvas
 near two million pixels. This avoids spending most of the frame on six million
 blended vertices at 4K/Retina resolution; the footer reports the visible
 sample independently from the simulated population.
+
+The seed uses a faint live spherical component as a self-consistent orbital
+backbone, plus a luminous four-arm disc and a counter-rotating polar annulus.
+The halo bodies move and contribute to gravity; their low luminosity prevents
+them from turning the view into fog. Particle color is derived from orbital
+family, angular momentum, infall/ejection, circularity, and a slowly decaying
+compression/excitation state. Absolute position is not a color input.
 
 In local Playwright runs on 2026-07-30, Chromium exposed an AMD `rdna-2`
 adapter (but no model string). Queue-drained diagnostics measured 7.3 ms at a

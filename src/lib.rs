@@ -4,7 +4,7 @@
 //! layout, capacity policy, complexity estimates, and the WGSL implementation.
 //! It is compiled as a dependency-free WebAssembly module.
 
-const SHADER: &str = include_str!("rainbow_fmm.wgsl");
+pub const SHADER: &str = include_str!("rainbow_fmm.wgsl");
 const ALGORITHM: &str = "Sparse p=1 Cartesian FMM / BLDTT-inspired adaptive hierarchy";
 
 pub const MIN_DEPTH: u32 = 4;

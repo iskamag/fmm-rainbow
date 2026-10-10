@@ -99,6 +99,8 @@ const PARAM_SLOTS = 16;
 const PARTICLE_BYTES = 32;
 const MOMENT_BYTES = 16;
 const FIELD_BYTES = 48;
+// One 2D dispatch row: the largest x dimension WebGPU allows.
+const PARTICLE_ROW = 65535 * 256;
 const ACCUMULATION_FORMAT = "rgba16float";
 const ACCUMULATION_SCALE = 0.5;
 
@@ -127,6 +129,13 @@ function levelOffset(level) {
 
 function levelCells(level) {
   return state.wasm.exports.rainbow_level_cells(level);
+}
+
+// Particle passes use a 2D grid: one row is the largest x dimension WebGPU
+// allows (65535 workgroups of 256 threads), so budgets beyond 16.7M bodies
+// stay under the per-dimension dispatch limit.
+function particleDispatch(count) {
+  return [Math.min(count, PARTICLE_ROW) / 256, Math.ceil(count / PARTICLE_ROW)];
 }
 
 function makeParams(level, upward = false, render = false) {
@@ -578,13 +587,14 @@ async function rebuildSimulation(requestedCount = state.count) {
     const pass = encoder.beginComputePass();
     pass.setPipeline(state.pipelines.initialize);
     pass.setBindGroup(0, state.computeBindGroup, [state.depth * PARAM_STRIDE]);
-    pass.dispatchWorkgroups(Math.ceil(state.count / 256));
+    pass.dispatchWorkgroups(...particleDispatch(state.count));
     pass.end();
     state.device.queue.submit([encoder.finish()]);
     await state.device.queue.onSubmittedWorkDone();
 
     ui.particleStat.textContent = state.count.toLocaleString("en-US");
-    ui.treeStat.textContent = `${state.cells.toLocaleString("en-US")} cells · ${state.renderCount.toLocaleString("en-US")} visible`;    refreshRunState(true);
+    ui.treeStat.textContent = `${state.cells.toLocaleString("en-US")} cells · ${state.renderCount.toLocaleString("en-US")} visible`;
+    refreshRunState(true);
     state.ready = true;
   } finally {
     state.rebuilding = false;
@@ -597,10 +607,10 @@ function encodeSolver(encoder) {
 
   pass.setPipeline(state.pipelines.clear_cells);
   pass.setBindGroup(0, state.computeBindGroup, [state.depth * PARAM_STRIDE]);
-  pass.dispatchWorkgroups(Math.ceil(state.cells / 256));
+  pass.dispatchWorkgroups(...particleDispatch(state.cells));
 
   pass.setPipeline(state.pipelines.deposit);
-  pass.dispatchWorkgroups(Math.ceil(state.count / 256));
+  pass.dispatchWorkgroups(...particleDispatch(state.count));
 
   pass.setPipeline(state.pipelines.upward);
   for (let level = state.depth - 1; level >= 0; level--) {
@@ -624,7 +634,7 @@ function encodeSolver(encoder) {
   }
   pass.setBindGroup(0, state.computeBindGroup, [state.depth * PARAM_STRIDE]);
   pass.setPipeline(state.pipelines.integrate);
-  pass.dispatchWorkgroups(Math.ceil(state.count / 256));
+  pass.dispatchWorkgroups(...particleDispatch(state.count));
   pass.end();
 }
 

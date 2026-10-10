@@ -11,6 +11,9 @@ const ADAPTIVE_LEAF_CAPACITY: u32 = 16u;
 // A 60% wider half-extent gives escaped structures 4.1x the old volume.
 const WORLD_HALF_EXTENT: f32 = 1.60;
 const WORLD_EDGE: f32 = WORLD_HALF_EXTENT * 0.985;
+// One 2D dispatch row holds 65535 workgroups of 256 threads, the largest x
+// dimension WebGPU allows; the particle passes index rows to stay under it.
+const PARTICLE_ROW: u32 = 65535u * 256u;
 
 struct Params {
     particle_count: u32,
@@ -240,7 +243,7 @@ fn seeded_enclosed_mass(radius: f32) -> f32 {
 
 @compute @workgroup_size(256)
 fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.x + gid.y * PARTICLE_ROW;
     if (i >= params.particle_count) {
         return;
     }
@@ -384,7 +387,7 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn clear_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.x + gid.y * PARTICLE_ROW;
     if (i >= params.total_cells) {
         return;
     }
@@ -398,7 +401,7 @@ fn clear_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.x + gid.y * PARTICLE_ROW;
     if (i >= params.particle_count) {
         return;
     }
@@ -587,7 +590,7 @@ fn near_field(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.x + gid.y * PARTICLE_ROW;
     if (i >= params.particle_count) {
         return;
     }

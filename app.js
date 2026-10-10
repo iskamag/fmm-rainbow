@@ -332,14 +332,45 @@ async function createPipelines() {
     bindGroupLayouts: [state.computeLayout],
   });
 
+  // The tree-reading passes (M2L, downward, near field) never touch atomics,
+  // so they bind the moments buffer read-only and fetch a source cell with one
+  // vector load instead of four atomic loads.
+  state.treeLayout = device.createBindGroupLayout({
+    label: "FMM read-only tree resources",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: PARAM_BYTES },
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" },
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" },
+      },
+    ],
+  });
+  const emptyGroupLayout = device.createBindGroupLayout({ entries: [] });
+  const treePipelineLayout = device.createPipelineLayout({
+    label: "FMM tree pipeline layout",
+    bindGroupLayouts: [
+      emptyGroupLayout,
+      emptyGroupLayout,
+      emptyGroupLayout,
+      state.treeLayout,
+    ],
+  });
+
   const entryPoints = [
     "initialize",
     "clear_cells",
     "deposit",
     "upward",
-    "m2l",
-    "downward",
-    "near_field",
     "integrate",
   ];
   const computePipelines = await Promise.all(entryPoints.map(async (entryPoint) => [
@@ -350,7 +381,15 @@ async function createPipelines() {
       compute: { module, entryPoint },
     }),
   ]));
-  Object.assign(state.pipelines, Object.fromEntries(computePipelines));
+  const treePipelines = await Promise.all(["m2l", "downward", "near_field"].map(async (entryPoint) => [
+    entryPoint,
+    await device.createComputePipelineAsync({
+      label: `FMM ${entryPoint}`,
+      layout: treePipelineLayout,
+      compute: { module, entryPoint },
+    }),
+  ]));
+  Object.assign(state.pipelines, Object.fromEntries(computePipelines), Object.fromEntries(treePipelines));
 
   const emptyLayout = device.createBindGroupLayout({ entries: [] });
   state.renderLayout = device.createBindGroupLayout({
@@ -515,6 +554,15 @@ async function rebuildSimulation(requestedCount = state.count) {
         { binding: 1, resource: { buffer: state.buffers.particles } },
       ],
     });
+    state.treeBindGroup = state.device.createBindGroup({
+      label: "FMM read-only tree bind group",
+      layout: state.treeLayout,
+      entries: [
+        { binding: 0, resource: { buffer: state.computeParams, size: PARAM_BYTES } },
+        { binding: 1, resource: { buffer: state.buffers.moments } },
+        { binding: 2, resource: { buffer: state.buffers.fields } },
+      ],
+    });
 
     updateComputeParams();
     const encoder = state.device.createCommandEncoder({ label: "Seed particle system" });
@@ -554,7 +602,7 @@ function encodeSolver(encoder) {
 
   for (let level = 1; level <= state.depth; level++) {
     const offset = level * PARAM_STRIDE;
-    pass.setBindGroup(0, state.computeBindGroup, [offset]);
+    pass.setBindGroup(3, state.treeBindGroup, [offset]);
     pass.setPipeline(state.pipelines.m2l);
     pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
     pass.setPipeline(state.pipelines.downward);
@@ -563,7 +611,7 @@ function encodeSolver(encoder) {
 
   pass.setPipeline(state.pipelines.near_field);
   for (let level = 1; level <= state.depth; level++) {
-    pass.setBindGroup(0, state.computeBindGroup, [level * PARAM_STRIDE]);
+    pass.setBindGroup(3, state.treeBindGroup, [level * PARAM_STRIDE]);
     pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
   }
   pass.setBindGroup(0, state.computeBindGroup, [state.depth * PARAM_STRIDE]);

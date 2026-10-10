@@ -6,11 +6,9 @@
 // interaction stencil, and L2L translates acceleration + its symmetric
 // Jacobian. The finest 27-cell neighborhood is evaluated separately.
 
-const FIXED_POINT: f32 = 1024.0;
 const TAU: f32 = 6.28318530718;
 const ADAPTIVE_LEAF_CAPACITY: u32 = 16u;
-// A 60% wider half-extent gives escaped structures 4.1x the old volume while
-// keeping worst-case fixed-point moment sums safely inside signed i32.
+// A 60% wider half-extent gives escaped structures 4.1x the old volume.
 const WORLD_HALF_EXTENT: f32 = 1.60;
 const WORLD_EDGE: f32 = WORLD_HALF_EXTENT * 0.985;
 
@@ -44,7 +42,7 @@ struct Params {
     control_point: vec4<f32>,
     // xyz = view-facing vortex axis; w = 1 pull, 2 push, 3 vortex.
     control_axis_mode: vec4<f32>,
-    // x = acceleration, y = radius; zw reserved for diagnostics.
+    // x = acceleration, y = radius; z = deposit fixed-point scale; w unused.
     control_settings: vec4<f32>,
 }
 
@@ -147,7 +145,7 @@ fn position_cell(pos: vec3<f32>, dim: u32) -> vec3<u32> {
 }
 
 fn moment_com(index: u32, count: u32) -> vec3<f32> {
-    let inv = 1.0 / (FIXED_POINT * f32(count));
+    let inv = 1.0 / (params.control_settings.z * f32(count));
     return vec3<f32>(
         f32(atomicLoad(&moments[index].sum_x)),
         f32(atomicLoad(&moments[index].sum_y)),
@@ -158,7 +156,7 @@ fn moment_com(index: u32, count: u32) -> vec3<f32> {
 fn moment_com_read(index: u32, count: u32) -> vec3<f32> {
     // x = count, yzw = fixed-point mass moments.
     let m = moments_read[index];
-    let inv = 1.0 / (FIXED_POINT * f32(count));
+    let inv = 1.0 / (tree_params.control_settings.z * f32(count));
     return vec3<f32>(f32(m.y), f32(m.z), f32(m.w)) * inv;
 }
 
@@ -407,10 +405,11 @@ fn deposit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pos = particles[i].pos_light.xyz;
     let c = position_cell(pos, params.level_dim);
     let cell = params.level_offset + linear_index(c, params.level_dim);
+    let fixed_point = params.control_settings.z;
     atomicAdd(&moments[cell].count, 1u);
-    atomicAdd(&moments[cell].sum_x, i32(round(pos.x * FIXED_POINT)));
-    atomicAdd(&moments[cell].sum_y, i32(round(pos.y * FIXED_POINT)));
-    atomicAdd(&moments[cell].sum_z, i32(round(pos.z * FIXED_POINT)));
+    atomicAdd(&moments[cell].sum_x, i32(round(pos.x * fixed_point)));
+    atomicAdd(&moments[cell].sum_y, i32(round(pos.y * fixed_point)));
+    atomicAdd(&moments[cell].sum_z, i32(round(pos.z * fixed_point)));
 }
 
 @compute @workgroup_size(64)

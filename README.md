@@ -4,7 +4,8 @@ A million-body rainbow gravity field, planned in Rust, exported as a small
 WebAssembly module, and executed by WebGPU compute shaders.
 
 The default preset is `1,048,576` particles and is sized for an overclocked
-RX 6800. Smaller presets are useful on laptop and software adapters.
+RX 6800. The budget reaches up to `5,242,880` (5M); smaller presets are useful
+on laptop and software adapters.
 
 ## Why the BLDTT paper
 
@@ -39,9 +40,12 @@ uses a low-order (`p = 1`) Cartesian expansion:
    monopoles; each particle samples its leaf field.
 
 The finest allocated grid is bounded at depth six. Empty cells exit after a
-single count check, and the depth is a constant for the supported range.
-Allocated cells are proportional to the selected particle budget (about four
-particles per finest cell), so the complete step is
+single count check, and the depth is a constant for the supported range. Depth
+six is deliberate: its whole octree — 299,593 cells, about 4.8 MiB of moments
+and local fields — stays cache-resident, whereas a depth-seven tree is 153 MiB
+and turns P2M and M2L into memory-latency-bound passes. Allocated cells are
+proportional to the selected particle budget (about eight particles per finest
+cell), so the complete step is
 
 ```text
 P2M O(N) + M2M O(C) + M2L O(189 C) + L2L O(C) + sampling O(N)
@@ -79,21 +83,23 @@ Field force and radius are adjustable. Each active tool evaluates one smooth,
 bounded field per particle, so interaction adds O(N) work and does not alter
 the solver's asymptotic complexity.
 
-## Memory at one million particles
+## Memory
 
-| Buffer | Approximate size |
-|---|---:|
-| Positions, dynamical hue, velocities, excitation | 32 MiB |
-| 299,593 fixed-point cell moments | 4.6 MiB |
-| Acceleration + tidal local fields | 13.7 MiB |
-| Half-scale HDR field + blur target at 1080p | about 8 MiB |
-| Uniform plans and overhead | < 1 MiB |
-| **Solver + visual field total** | **about 59 MiB** |
+At one million particles the solver and visual field total about 59 MiB: 32 MiB
+of particle state, 4.6 MiB of cell moments, 13.7 MiB of local fields, about
+8 MiB for the half-scale HDR field and its blur target at 1080p, and under
+1 MiB of uniform plans and overhead.
 
-This leaves substantial headroom in a 16 GiB RX 6800 for the browser,
-swapchain, and driver allocations. Actual frame rate depends on browser,
-resolution, clock/power limits, and particle distribution; use the live frame
-readout rather than treating a build-time estimate as a benchmark.
+At 5,242,880 particles the octree size is unchanged — the depth-six cap holds
+it at 299,593 cells — and the extra cost is particle state alone: 160 MiB of
+positions, hue, velocities, and excitation. The multi-million budgets exceed the
+default 128 MiB storage-binding limit, so the device is requested with the
+adapter's own `maxStorageBufferBindingSize` and `maxBufferSize`.
+
+This leaves headroom in a 16 GiB RX 6800 for the browser, swapchain, and driver
+allocations. Actual frame rate depends on browser, resolution, clock/power
+limits, and particle distribution; use the live frame readout rather than
+treating a build-time estimate as a benchmark.
 
 All 1,048,576 bodies participate in both the force solve and the visual pass.
 Each body makes one additive deposit into a half-scale `rgba16float`
@@ -179,4 +185,4 @@ playwright-cli -s=rainbow console
 ```
 
 For an intentionally small diagnostic plan, pass `?particles=16384`. The
-public control starts at 131,072 and tops out at 1,048,576.
+public control starts at 131,072 and tops out at 5,242,880.

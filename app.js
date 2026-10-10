@@ -65,6 +65,7 @@ const state = {
   count: 1 << 20,
   depth: 6,
   cells: 299_593,
+  fixedPointScale: 1024,
   renderCount: 1 << 20,
   renderStride: 1,
   resolutionScale: 1,
@@ -169,7 +170,7 @@ function makeParams(level, upward = false, render = false) {
     TOOL_MODES[state.tool] || 0,
     Number(ui.controlStrength.value),
     Number(ui.controlRadius.value),
-    render ? Math.sin(state.pitch) : 0,
+    render ? Math.sin(state.pitch) : state.fixedPointScale,
     0,
   ];
   floats.forEach((value, index) => view.setFloat32(32 + index * 4, value, true));
@@ -268,6 +269,13 @@ async function createGpu() {
 
   state.device = await state.adapter.requestDevice({
     label: "Rainbow FMM device",
+    // The default tier caps a single storage binding at 128 MiB, which the
+    // multi-million particle buffer exceeds. Ask for the adapter's own maxima;
+    // these are always satisfiable because the adapter reports them.
+    requiredLimits: {
+      maxStorageBufferBindingSize: state.adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: state.adapter.limits.maxBufferSize,
+    },
   });
   state.device.addEventListener("uncapturederror", (event) => {
     showError(`WebGPU validation error: ${event.error.message}`);
@@ -513,6 +521,7 @@ async function rebuildSimulation(requestedCount = state.count) {
     state.count = state.wasm.exports.rainbow_clamp_particle_count(requestedCount);
     state.depth = state.wasm.exports.rainbow_depth_for_particles(state.count);
     state.cells = state.wasm.exports.rainbow_total_cells(state.depth);
+    state.fixedPointScale = state.wasm.exports.rainbow_fixed_point_scale(state.count);
     // Every simulated body contributes to the compact HDR density field.
     state.renderStride = 1;
     state.renderCount = state.count;
@@ -575,8 +584,7 @@ async function rebuildSimulation(requestedCount = state.count) {
     await state.device.queue.onSubmittedWorkDone();
 
     ui.particleStat.textContent = state.count.toLocaleString("en-US");
-    ui.treeStat.textContent = `${state.cells.toLocaleString("en-US")} cells · ${state.renderCount.toLocaleString("en-US")} visible`;
-    refreshRunState(true);
+    ui.treeStat.textContent = `${state.cells.toLocaleString("en-US")} cells · ${state.renderCount.toLocaleString("en-US")} visible`;    refreshRunState(true);
     state.ready = true;
   } finally {
     state.rebuilding = false;

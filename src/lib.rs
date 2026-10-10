@@ -12,8 +12,15 @@ pub const MAX_DEPTH: u32 = 6;
 // Small plans are accepted for software-adapter diagnostics; the public UI
 // starts at 2^17 and the tuned target remains 2^20.
 pub const MIN_PARTICLES: u32 = 1 << 14;
-pub const MAX_PARTICLES: u32 = 1 << 20;
-pub const TARGET_PARTICLES_PER_LEAF: u32 = 4;
+pub const MAX_PARTICLES: u32 = 1 << 23;
+// Keep about eight particles per finest cell. Refining past this only grows
+// the (dense) octree footprint and hurts cache residency without improving the
+// p=1 approximation.
+pub const TARGET_PARTICLES_PER_LEAF: u32 = 8;
+// The fixed-point moment sums are i32 atomics (WebGPU has no 64-bit atomics),
+// so the deposit scale must shrink as the particle budget grows. Worst case is
+// every body at the domain edge: sum = N * WORLD_HALF_EXTENT * FIXED_POINT.
+pub const WORLD_HALF_EXTENT: f32 = 1.60;
 
 /// Number of cells in one level of an octree.
 pub const fn level_cells(level: u32) -> u32 {
@@ -30,10 +37,11 @@ pub const fn total_cells(depth: u32) -> u32 {
     level_offset(depth + 1)
 }
 
-/// Choose a bounded leaf depth with roughly four particles per finest cell.
+/// Choose a bounded leaf depth with roughly eight particles per finest cell.
 ///
 /// The depth cap is important for WebGPU: it turns every per-level constant
-/// into a true constant for the advertised million-particle operating range.
+/// into a true constant for the advertised particle range, and keeps the whole
+/// octree (moments plus fields) small enough to stay cache-resident.
 pub const fn depth_for_particles(particles: u32) -> u32 {
     let target_cells = particles.div_ceil(TARGET_PARTICLES_PER_LEAF);
     let mut depth = MIN_DEPTH;
@@ -41,6 +49,23 @@ pub const fn depth_for_particles(particles: u32) -> u32 {
         depth += 1;
     }
     depth
+}
+
+/// Fixed-point scale for the deposit pass.
+///
+/// Moment sums accumulate `round(pos * scale)` over up to `particles` bodies
+/// inside one i32, so the scale is capped by the worst case of every body
+/// sitting at the domain edge. A power of two keeps the division exact.
+pub fn fixed_point_scale(particles: u32) -> f32 {
+    // Positions are clamped below WORLD_HALF_EXTENT, so the worst-case sum is
+    // particles * WORLD_HALF_EXTENT * scale. A headroom of 0.82 puts one
+    // million bodies at their original scale of 1024 and every larger budget at
+    // a safe power of two below it.
+    const HEADROOM: f64 = 0.82;
+    let worst = particles as f64 * WORLD_HALF_EXTENT as f64;
+    let max_scale = HEADROOM * (i32::MAX as f64) / worst.max(1.0);
+    let exponent = max_scale.log2().floor();
+    (2.0f64).powf(exponent) as f32
 }
 
 pub const fn clamp_particle_count(requested: u32) -> u32 {
@@ -119,6 +144,11 @@ pub extern "C" fn rainbow_clamp_particle_count(requested: u32) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rainbow_fixed_point_scale(particles: u32) -> f32 {
+    fixed_point_scale(clamp_particle_count(particles))
+}
+
+#[no_mangle]
 pub extern "C" fn rainbow_linear_work_lo(particles: u32, depth: u32) -> u32 {
     linear_work_bound(
         clamp_particle_count(particles),
@@ -145,7 +175,31 @@ mod tests {
     fn million_particle_plan_uses_depth_six() {
         assert_eq!(depth_for_particles(1 << 20), 6);
         assert_eq!(level_cells(6), 262_144);
-        assert_eq!(clamp_particle_count(u32::MAX), 1 << 20);
+        assert_eq!(clamp_particle_count(u32::MAX), 1 << 23);
+    }
+
+    #[test]
+    fn multi_million_plans_stay_cache_resident() {
+        // Depth six is the residency ceiling: its 4.8 MiB tree (moments plus
+        // fields) fits on-die, while depth seven's 153 MiB does not.
+        for particles in [1 << 21, 1 << 22, 1 << 23] {
+            assert_eq!(depth_for_particles(particles), 6);
+        }
+        assert_eq!(total_cells(6), 299_593);
+    }
+
+    #[test]
+    fn fixed_point_scale_stays_inside_i32() {
+        for particles in [1 << 14, 1 << 20, 1 << 21, 1 << 22, 1 << 23] {
+            let scale = fixed_point_scale(particles) as f64;
+            let worst = particles as f64 * WORLD_HALF_EXTENT as f64 * scale;
+            assert!(
+                worst < i32::MAX as f64,
+                "{particles} bodies overflow i32: {worst}"
+            );
+            // A power of two keeps the moment divide exact.
+            assert_eq!(scale.log2().fract(), 0.0);
+        }
     }
 
     #[test]

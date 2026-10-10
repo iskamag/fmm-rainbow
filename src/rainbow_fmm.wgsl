@@ -683,21 +683,33 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     velocity += acceleration * dt;
     pos += velocity * dt;
 
-    // A safety boundary only affects particles that escape the expanded FMM
-    // domain. It prevents fixed-point overflow after extreme tweaking.
+    // A soft absorbing boundary, not a hard wall. Outflowing bodies that reach
+    // the outer band shed radial speed smoothly, so a supernova expands and
+    // dissolves into a fading thermal remnant rather than piling into a flat,
+    // stalled cube of color on the domain faces. The hard clamp survives only
+    // as a last-resort guard against fixed-point overflow.
+    let edge_band = 0.12 * WORLD_HALF_EXTENT;
     for (var axis = 0u; axis < 3u; axis++) {
+        let over = abs(pos[axis]) - (WORLD_EDGE - edge_band);
+        if (over > 0.0) {
+            let absorb = clamp(over / edge_band, 0.0, 1.0);
+            velocity[axis] *= 1.0 - absorb * 0.16;
+        }
         if (abs(pos[axis]) > WORLD_EDGE) {
             pos[axis] = clamp(pos[axis], -WORLD_EDGE, WORLD_EDGE);
-            velocity[axis] *= -0.82;
+            velocity[axis] *= -0.55;
         }
     }
 
-    // Hue is a persistent material state seeded from orbital phase. Shocks and
-    // external work advect it slowly, so color reacts without a render-time
-    // coordinate lookup or expensive per-vertex inverse trigonometry.
+    // Hue is a persistent material state seeded from orbital phase. It drifts
+    // slowly at rest but freezes once a body is shock-heated, so a supernova
+    // cannot spin every particle around the color wheel into confetti. Event
+    // color comes from the radial-flow and heat response at render time, not
+    // from private hue advection.
+    let hue_drift = 1.0 - smoothstep(0.30, 0.70, excitation);
     let dynamical_hue = fract(
         particle.pos_light.w +
-        dt * (
+        dt * hue_drift * (
             0.012 +
             signed_radial_motion * 0.030 +
             excitation * 0.036 +
@@ -762,39 +774,42 @@ fn render_vertex(
     let velocity = length(world_velocity);
     let speed = max(velocity, 0.0001);
     let excitation = clamp(particle.vel_hue.w, 0.0, 1.0);
-    let family = random01(particle_index * 11u + 6u);
-    var luminosity = 1.0;
-    var spectral = vec3<f32>(1.00, 0.66, 0.30);
-    if (family < 0.05) {
-        luminosity = 0.10;
-        spectral = vec3<f32>(1.00, 0.66, 0.30);
-    } else if (family < 0.75) {
-        luminosity = 0.032;
-        // Keep the numerous, faint mass halo quiet and cool. Its orbital-plane
-        // signature changes value, not hue, so it cannot become confetti.
-        spectral = vec3<f32>(0.12, 0.24, 0.38) * (
-            0.72 + (world_velocity.y / speed * 0.5 + 0.5) * 0.34
-        );
-    } else {
-        if (family >= 0.93) {
-            luminosity = 1.22;
-        }
-        spectral = pow(
-            rainbow(particle.pos_light.w),
-            vec3<f32>(0.88),
-        );
-    }
-    // Phase-space state controls both the continuous spectrum and luminance.
-    // Absolute position does not participate.
-    let state_gain =
-        0.80 +
-        min(velocity, 1.0) * 0.10 +
-        excitation * 0.26;
-    let heated = min(
-        vec3<f32>(1.0),
-        spectral * state_gain +
-        vec3<f32>(excitation * excitation * 0.06),
+    // Radial phase is the supernova signature: infall (negative) reads as a
+    // cool, blueshifted compressive shell; outflow (positive) as a warm,
+    // expanding one. It is continuous, never wraps the color wheel, and skips
+    // the perceptually uneven green band, so an event groups into two coherent
+    // flows instead of confetti. Absolute position is still not a color input.
+    let signed_radial = clamp(
+        dot(world, world_velocity) / (max(length(world), 0.0001) * speed),
+        -1.0,
+        1.0,
     );
+    let infall = clamp(-signed_radial, 0.0, 1.0);
+    let outflow = clamp(signed_radial, 0.0, 1.0);
+
+    // A calm disc is a muted lavender; flow pushes it toward a bounded
+    // complementary pair (cyan-blue for infall, amber for outflow).
+    let neutral = vec3<f32>(0.50, 0.42, 0.58);
+    let cool = vec3<f32>(0.24, 0.56, 1.00);
+    let warm = vec3<f32>(1.00, 0.50, 0.20);
+    var spectral = mix(neutral, cool, infall);
+    spectral = mix(spectral, warm, outflow);
+    // Persistent orbital hue tints each body so the seeded galaxy keeps
+    // per-body character. The tint fades out as the body heats, so a supernova
+    // reads as one coherent flash instead of many private colors.
+    let heat = smoothstep(0.18, 0.85, excitation);
+    let tint = pow(rainbow(particle.pos_light.w), vec3<f32>(0.85));
+    spectral = mix(spectral * tint, spectral, heat);
+
+    // Luminance rises with speed (fast bodies streak bright; slow ones recede,
+    // which also hides their sub-texel stepping) and with shock heat, which
+    // lifts toward a white-hot core so overlap becomes HDR brightness instead
+    // of a saturated primary cube. No per-deposit clamp: the rgba16float field
+    // and filmic resolve are meant to take values above 1.0.
+    let luminosity = 0.30 + excitation * 0.90;
+    let speed_gain = 0.62 + min(velocity * 1.4, 1.0) * 0.30;
+    let heated = spectral * (speed_gain + excitation * 0.90) +
+        vec3<f32>(heat * heat * 0.55);
     var control_influence = 0.0;
     var control_color = vec3<f32>(0.82, 1.0, 0.28);
     if (render_params.control_point.w > 0.5) {

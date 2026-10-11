@@ -77,16 +77,20 @@ struct Field {
 @group(0) @binding(2) var<storage, read_write> moments: array<Moment>;
 @group(0) @binding(3) var<storage, read_write> fields: array<Field>;
 
-// Tree-reading passes (M2L, downward, near field) run after `upward` has
-// completed the tree, so they never need atomic access to the moments. They
-// bind the moments buffer through this read-only view instead, where a plain
-// `vec4<i32>` (same 16-byte layout) fetches a source cell with one vector load
-// rather than four atomic loads. WebGPU forbids mixing writable and read-only
-// storage views of one buffer in a single bind group, so these passes bind
-// this group and must not also bind group 0; `fields` stays writable here.
+// Tree-reading passes (M2L, downward, near field, integrate) run after
+// `upward` has completed the tree, so they never need atomic access to the
+// moments. They bind the moments buffer through this read-only view instead,
+// where a plain `vec4<i32>` (same 16-byte layout) fetches a cell with one
+// vector load rather than four atomic loads; integrate's descent reads one
+// count per level, so a plain load there is the difference between a
+// memory-latency-bound and a throughput-bound pass. WebGPU forbids mixing
+// writable and read-only storage views of one buffer in a single bind group,
+// so these passes bind this group and must not also bind group 0; `fields`
+// stays writable here, and integrate's particle update rides binding 3.
 @group(3) @binding(0) var<uniform> tree_params: Params;
 @group(3) @binding(1) var<storage, read> moments_read: array<vec4<i32>>;
 @group(3) @binding(2) var<storage, read_write> tree_fields: array<Field>;
+@group(3) @binding(3) var<storage, read_write> tree_particles: array<Particle>;
 
 @group(1) @binding(0) var<uniform> render_params: Params;
 @group(1) @binding(1) var<storage, read> render_particles: array<Particle>;
@@ -591,24 +595,24 @@ fn near_field(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(256)
 fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x + gid.y * PARTICLE_ROW;
-    if (i >= params.particle_count) {
+    if (i >= tree_params.particle_count) {
         return;
     }
-    var particle = particles[i];
+    var particle = tree_particles[i];
     var pos = particle.pos_light.xyz;
     var velocity = particle.vel_hue.xyz;
     // Descend only while the local density requires it. This selects a true
     // non-uniform leaf per particle without a serial tree walk or dynamic
     // allocation: the maximum six checks are a bounded constant.
-    var chosen_dim = params.level_dim;
+    var chosen_dim = tree_params.level_dim;
     var chosen_cell = position_cell(pos, chosen_dim);
-    var cell_index = params.level_offset + linear_index(chosen_cell, chosen_dim);
-    for (var level = 1u; level <= params.depth; level++) {
+    var cell_index = tree_params.level_offset + linear_index(chosen_cell, chosen_dim);
+    for (var level = 1u; level <= tree_params.depth; level++) {
         let dim = 1u << level;
         let c = position_cell(pos, dim);
         let index = octree_offset(level) + linear_index(c, dim);
-        let count_at_level = atomicLoad(&moments[index].count);
-        if (count_at_level <= ADAPTIVE_LEAF_CAPACITY || level == params.depth) {
+        let count_at_level = moments_read[index].x;
+        if (count_at_level <= i32(ADAPTIVE_LEAF_CAPACITY) || level == tree_params.depth) {
             chosen_dim = dim;
             chosen_cell = c;
             cell_index = index;
@@ -616,46 +620,46 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     let center = cell_center(chosen_cell, chosen_dim);
-    let field = fields[cell_index];
+    let field = tree_fields[cell_index];
     var acceleration = field.a.xyz + field_j_mul(field, pos - center);
 
     // Approximate the unresolved content of the particle's own leaf with a
     // softened monopole about its center of mass. This is bounded and O(N).
-    let count = atomicLoad(&moments[cell_index].count);
+    let count = u32(moments_read[cell_index].x);
     if (count > 1u) {
-        let com = moment_com(cell_index, count);
+        let com = moment_com_read(cell_index, count);
         let delta = com - pos;
         let epsilon = max(
-            params.softening,
+            tree_params.softening,
             0.62 * WORLD_HALF_EXTENT / f32(chosen_dim),
         );
         let inv_r = inverseSqrt(dot(delta, delta) + epsilon * epsilon);
-        let self_mass = f32(count - 1u) / f32(params.particle_count);
-        acceleration += params.gravity * self_mass * delta * inv_r * inv_r * inv_r;
+        let self_mass = f32(count - 1u) / f32(tree_params.particle_count);
+        acceleration += tree_params.gravity * self_mass * delta * inv_r * inv_r * inv_r;
     }
 
     // The interactive shepherd is a smooth, finite-radius external field.
     // It is one bounded calculation per body, so it does not change O(N).
     var control_influence = 0.0;
-    if (params.control_point.w > 0.5) {
-        let control_delta = params.control_point.xyz - pos;
+    if (tree_params.control_point.w > 0.5) {
+        let control_delta = tree_params.control_point.xyz - pos;
         let distance2 = dot(control_delta, control_delta);
-        let control_radius = max(params.control_settings.y, 0.02);
+        let control_radius = max(tree_params.control_settings.y, 0.02);
         control_influence = exp(
             -2.0 * distance2 / (control_radius * control_radius),
         );
-        let control_strength = params.control_settings.x;
+        let control_strength = tree_params.control_settings.x;
         let direction = control_delta * inverseSqrt(
             distance2 + control_radius * control_radius * 0.018,
         );
-        let mode = params.control_axis_mode.w;
+        let mode = tree_params.control_axis_mode.w;
         if (mode < 1.5) {
             acceleration += direction * control_strength * control_influence;
         } else if (mode < 2.5) {
             acceleration -= direction * control_strength * control_influence;
         } else {
             let tangent = cross(
-                normalize(params.control_axis_mode.xyz),
+                normalize(tree_params.control_axis_mode.xyz),
                 control_delta,
             );
             let tangent_length = length(tangent);
@@ -668,7 +672,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // One-force symplectic Euler: unlike explicit Euler, energy error remains
     // bounded for the smooth Hamiltonian used by the visual simulation.
-    let dt = params.dt * params.speed;
+    let dt = tree_params.dt * tree_params.speed;
     let radius = max(length(pos), 0.0001);
     let velocity_length = max(length(velocity), 0.0001);
     let signed_radial_motion = clamp(
@@ -745,7 +749,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     particle.pos_light = vec4<f32>(pos, dynamical_hue);
     particle.vel_hue = vec4<f32>(velocity, excitation);
-    particles[i] = particle;
+    tree_particles[i] = particle;
 }
 
 struct VertexOutput {

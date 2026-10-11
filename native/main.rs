@@ -245,7 +245,12 @@ fn main() {
     // Tree-reading passes see the moments buffer read-only.
     let tree_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("tree"),
-        entries: &[entry(0, uniform.clone()), entry(1, storage(true)), entry(2, storage(false))],
+        entries: &[
+            entry(0, uniform.clone()),
+            entry(1, storage(true)),
+            entry(2, storage(false)),
+            entry(3, storage(false)),
+        ],
     });
 
     let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -275,10 +280,10 @@ fn main() {
         })
     };
     let mut pipes: HashMap<&str, wgpu::ComputePipeline> = HashMap::new();
-    for name in ["initialize", "clear_cells", "deposit", "upward", "integrate"] {
+    for name in ["initialize", "clear_cells", "deposit", "upward"] {
         pipes.insert(name, mk(name, &compute_pipeline_layout));
     }
-    for name in ["m2l", "downward", "near_field"] {
+    for name in ["m2l", "downward", "near_field", "integrate"] {
         pipes.insert(name, mk(name, &tree_pipeline_layout));
     }
 
@@ -335,6 +340,7 @@ fn main() {
             wgpu::BindGroupEntry { binding: 0, resource: params_binding(0) },
             wgpu::BindGroupEntry { binding: 1, resource: moments_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: fields_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: particles_buf.as_entire_binding() },
         ],
     });
     let empty_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -400,10 +406,9 @@ fn main() {
     };
     let encode_integrate = |cp: &mut wgpu::ComputePass| {
         cp.set_pipeline(&pipes["integrate"]);
-        cp.set_bind_group(0, &compute_bind, &[base]);
         cp.set_bind_group(1, &empty_bind, &[]);
         cp.set_bind_group(2, &empty_bind, &[]);
-        cp.set_bind_group(3, &empty_bind, &[]);
+        cp.set_bind_group(3, &tree_bind, &[base]);
         let (gx, gy) = particle_grid(count);
         cp.dispatch_workgroups(gx, gy, 1);
     };

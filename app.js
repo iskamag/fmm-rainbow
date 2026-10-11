@@ -370,6 +370,11 @@ async function createPipelines() {
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "storage" },
       },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" },
+      },
     ],
   });
   const emptyGroupLayout = device.createBindGroupLayout({ entries: [] });
@@ -388,7 +393,6 @@ async function createPipelines() {
     "clear_cells",
     "deposit",
     "upward",
-    "integrate",
   ];
   const computePipelines = await Promise.all(entryPoints.map(async (entryPoint) => [
     entryPoint,
@@ -398,7 +402,7 @@ async function createPipelines() {
       compute: { module, entryPoint },
     }),
   ]));
-  const treePipelines = await Promise.all(["m2l", "downward", "near_field"].map(async (entryPoint) => [
+  const treePipelines = await Promise.all(["m2l", "downward", "near_field", "integrate"].map(async (entryPoint) => [
     entryPoint,
     await device.createComputePipelineAsync({
       label: `FMM ${entryPoint}`,
@@ -545,12 +549,12 @@ async function rebuildSimulation(requestedCount = state.count) {
       moments: createBuffer(
         "Sparse octree fixed-point moments",
         state.cells * MOMENT_BYTES,
-        usage.STORAGE | usage.COPY_DST,
+        usage.STORAGE | usage.COPY_DST | usage.COPY_SRC,
       ),
       fields: createBuffer(
         "FMM local acceleration and tidal fields",
         state.cells * FIELD_BYTES,
-        usage.STORAGE | usage.COPY_DST,
+        usage.STORAGE | usage.COPY_DST | usage.COPY_SRC,
       ),
     };
 
@@ -579,6 +583,7 @@ async function rebuildSimulation(requestedCount = state.count) {
         { binding: 0, resource: { buffer: state.computeParams, size: PARAM_BYTES } },
         { binding: 1, resource: { buffer: state.buffers.moments } },
         { binding: 2, resource: { buffer: state.buffers.fields } },
+        { binding: 3, resource: { buffer: state.buffers.particles } },
       ],
     });
 
@@ -632,7 +637,7 @@ function encodeSolver(encoder) {
     pass.setBindGroup(3, state.treeBindGroup, [level * PARAM_STRIDE]);
     pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
   }
-  pass.setBindGroup(0, state.computeBindGroup, [state.depth * PARAM_STRIDE]);
+  pass.setBindGroup(3, state.treeBindGroup, [state.depth * PARAM_STRIDE]);
   pass.setPipeline(state.pipelines.integrate);
   pass.dispatchWorkgroups(...particleDispatch(state.count));
   pass.end();

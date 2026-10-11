@@ -283,7 +283,7 @@ fn main() {
     for name in ["initialize", "clear_cells", "deposit", "upward"] {
         pipes.insert(name, mk(name, &compute_pipeline_layout));
     }
-    for name in ["m2l", "downward", "near_field", "integrate"] {
+    for name in ["downward", "integrate", "m2l_all", "near_all"] {
         pipes.insert(name, mk(name, &tree_pipeline_layout));
     }
 
@@ -378,13 +378,11 @@ fn main() {
         }
     };
     let encode_m2l = |cp: &mut wgpu::ComputePass| {
-        cp.set_pipeline(&pipes["m2l"]);
-        for l in 1..=depth {
-            cp.set_bind_group(3, &tree_bind, &[l * PARAM_STRIDE as u32]);
-            cp.set_bind_group(1, &empty_bind, &[]);
-            cp.set_bind_group(2, &empty_bind, &[]);
-            cp.dispatch_workgroups(level_cells(l).div_ceil(64), 1, 1);
-        }
+        cp.set_pipeline(&pipes["m2l_all"]);
+        cp.set_bind_group(3, &tree_bind, &[0]);
+        cp.set_bind_group(1, &empty_bind, &[]);
+        cp.set_bind_group(2, &empty_bind, &[]);
+        cp.dispatch_workgroups((cells - 1).div_ceil(64), 1, 1);
     };
     let encode_downward = |cp: &mut wgpu::ComputePass| {
         cp.set_pipeline(&pipes["downward"]);
@@ -396,13 +394,11 @@ fn main() {
         }
     };
     let encode_near = |cp: &mut wgpu::ComputePass| {
-        cp.set_pipeline(&pipes["near_field"]);
-        for l in 1..=depth {
-            cp.set_bind_group(3, &tree_bind, &[l * PARAM_STRIDE as u32]);
-            cp.set_bind_group(1, &empty_bind, &[]);
-            cp.set_bind_group(2, &empty_bind, &[]);
-            cp.dispatch_workgroups(level_cells(l).div_ceil(64), 1, 1);
-        }
+        cp.set_pipeline(&pipes["near_all"]);
+        cp.set_bind_group(3, &tree_bind, &[0]);
+        cp.set_bind_group(1, &empty_bind, &[]);
+        cp.set_bind_group(2, &empty_bind, &[]);
+        cp.dispatch_workgroups((cells - 1).div_ceil(64), 1, 1);
     };
     let encode_integrate = |cp: &mut wgpu::ComputePass| {
         cp.set_pipeline(&pipes["integrate"]);

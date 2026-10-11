@@ -402,7 +402,7 @@ async function createPipelines() {
       compute: { module, entryPoint },
     }),
   ]));
-  const treePipelines = await Promise.all(["m2l", "downward", "near_field", "integrate"].map(async (entryPoint) => [
+  const treePipelines = await Promise.all(["downward", "integrate", "m2l_all", "near_all"].map(async (entryPoint) => [
     entryPoint,
     await device.createComputePipelineAsync({
       label: `FMM ${entryPoint}`,
@@ -623,20 +623,24 @@ function encodeSolver(encoder) {
     pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
   }
 
-  for (let level = 1; level <= state.depth; level++) {
-    const offset = level * PARAM_STRIDE;
-    pass.setBindGroup(3, state.treeBindGroup, [offset]);
-    pass.setPipeline(state.pipelines.m2l);
-    pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
-    pass.setPipeline(state.pipelines.downward);
-    pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
-  }
+  // m2l and near each cover every level in one dispatch; downward stays
+  // per-level because it reads the parent level's fields, so levels must remain
+  // ordered. Collapsing m2l and near removes the per-dispatch latency that
+  // dominated the shallow tree levels.
+  pass.setPipeline(state.pipelines.m2l_all);
+  pass.setBindGroup(3, state.treeBindGroup, [0]);
+  pass.dispatchWorkgroups(Math.ceil((state.cells - 1) / 64));
 
-  pass.setPipeline(state.pipelines.near_field);
+  pass.setPipeline(state.pipelines.downward);
   for (let level = 1; level <= state.depth; level++) {
     pass.setBindGroup(3, state.treeBindGroup, [level * PARAM_STRIDE]);
     pass.dispatchWorkgroups(Math.ceil(levelCells(level) / 64));
   }
+
+  pass.setPipeline(state.pipelines.near_all);
+  pass.setBindGroup(3, state.treeBindGroup, [0]);
+  pass.dispatchWorkgroups(Math.ceil((state.cells - 1) / 64));
+
   pass.setBindGroup(3, state.treeBindGroup, [state.depth * PARAM_STRIDE]);
   pass.setPipeline(state.pipelines.integrate);
   pass.dispatchWorkgroups(...particleDispatch(state.count));

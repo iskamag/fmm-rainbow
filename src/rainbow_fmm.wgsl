@@ -167,22 +167,6 @@ fn moment_com_read(index: u32, count: u32) -> vec3<f32> {
     return vec3<f32>(f32(m.y), f32(m.z), f32(m.w)) * inv;
 }
 
-fn target_is_on_adaptive_path(local_index: u32) -> bool {
-    if (tree_params.level == 0u) {
-        return true;
-    }
-    let c = cell_coord(local_index, tree_params.level_dim);
-    let parent_cell = c / 2u;
-    let parent_index = tree_params.parent_offset +
-        linear_index(parent_cell, tree_params.parent_dim);
-    return moments_read[parent_index].x > i32(ADAPTIVE_LEAF_CAPACITY);
-}
-
-fn target_is_adaptive_leaf(local_index: u32, count: u32) -> bool {
-    return target_is_on_adaptive_path(local_index) &&
-        (count <= ADAPTIVE_LEAF_CAPACITY || tree_params.level == tree_params.depth);
-}
-
 fn pair_field(source_index: u32, target_position: vec3<f32>, epsilon: f32) -> Field {
     let count = u32(moments_read[source_index].x);
     if (count == 0u) {
@@ -389,6 +373,24 @@ fn initialize(@builtin(global_invocation_id) gid: vec3<u32>) {
     particles[i].vel_hue = vec4<f32>(vel, excitation);
 }
 
+// The m2l and near passes each cover every level in a single dispatch. Levels
+// are contiguous runs of cells after octree_offset(level); this walk finds the
+// run a global cell id belongs to. One dispatch instead of one per level
+// removes the per-dispatch latency that dominated the shallow levels.
+fn level_of(g: u32) -> u32 {
+    var level = 1u;
+    var start = 1u;
+    loop {
+        let cells = 1u << (3u * level);
+        if (g < start + cells) {
+            break;
+        }
+        start += cells;
+        level += 1u;
+    }
+    return level;
+}
+
 @compute @workgroup_size(256)
 fn clear_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x + gid.y * PARTICLE_ROW;
@@ -453,27 +455,30 @@ fn upward(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn m2l(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let local_index = gid.x;
-    let cell_count = tree_params.level_dim * tree_params.level_dim * tree_params.level_dim;
-    if (local_index >= cell_count) {
+fn m2l_all(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let g = gid.x + 1u; // cell 0 is the root; every level starts at 1
+    if (g >= tree_params.total_cells) {
         return;
     }
-
-    let target_index = tree_params.level_offset + local_index;
+    let level = level_of(g);
+    let start = octree_offset(level);
+    let local_index = g - start;
+    let dim = 1u << level;
+    let parent_dim = dim >> 1u;
+    let target_index = g;
+    let tc_u = cell_coord(local_index, dim);
+    let parent_index = octree_offset(level - 1u) +
+        linear_index(tc_u / 2u, parent_dim);
     if (moments_read[target_index].x == 0 ||
-        !target_is_on_adaptive_path(local_index)) {
+        moments_read[parent_index].x <= i32(ADAPTIVE_LEAF_CAPACITY)) {
         tree_fields[target_index] = zero_field();
         return;
     }
-
-    let tc_u = cell_coord(local_index, tree_params.level_dim);
     let tc = vec3<i32>(tc_u);
     let parent = tc / 2;
-    let target_center = cell_center(tc_u, tree_params.level_dim);
-    let dim_i = i32(tree_params.level_dim);
-    let level_offset = tree_params.level_offset;
-    let level_dim = tree_params.level_dim;
+    let target_center = cell_center(tc_u, dim);
+    let dim_i = i32(dim);
+    let level_offset = start;
     var result = zero_field();
     // The children of the 3x3x3 parent neighborhood, excluding the target's
     // immediate 3x3x3 neighborhood: at most 216 - 27 = 189 interactions.
@@ -482,7 +487,7 @@ fn m2l(@builtin(global_invocation_id) gid: vec3<u32>) {
             for (var px = -1; px <= 1; px++) {
                 let source_parent = parent + vec3<i32>(px, py, pz);
                 if (any(source_parent < vec3<i32>(0)) ||
-                    any(source_parent >= vec3<i32>(i32(tree_params.parent_dim)))) {
+                    any(source_parent >= vec3<i32>(i32(parent_dim)))) {
                     continue;
                 }
                 for (var cz = 0; cz < 2; cz++) {
@@ -497,12 +502,9 @@ fn m2l(@builtin(global_invocation_id) gid: vec3<u32>) {
                             if (all(separation <= vec3<i32>(1))) {
                                 continue;
                             }
-                            let source_u = vec3<u32>(source_c);
                             let source_index = level_offset +
-                                linear_index(source_u, level_dim);
-                            let cell_epsilon =
-                                0.06 * WORLD_HALF_EXTENT /
-                                f32(level_dim);
+                                linear_index(vec3<u32>(source_c), dim);
+                            let cell_epsilon = 0.06 * WORLD_HALF_EXTENT / f32(dim);
                             result = add_field(
                                 result,
                                 pair_field(source_index, target_center, cell_epsilon),
@@ -514,6 +516,70 @@ fn m2l(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     tree_fields[target_index] = result;
+}
+
+@compute @workgroup_size(64)
+fn near_all(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let g = gid.x + 1u;
+    if (g >= tree_params.total_cells) {
+        return;
+    }
+    let level = level_of(g);
+    let start = octree_offset(level);
+    let local_index = g - start;
+    let dim = 1u << level;
+    let parent_dim = dim >> 1u;
+    let target_index = g;
+    let target_count = u32(moments_read[target_index].x);
+    let tc_u = cell_coord(local_index, dim);
+    let parent_index = octree_offset(level - 1u) +
+        linear_index(tc_u / 2u, parent_dim);
+    let on_path = moments_read[parent_index].x > i32(ADAPTIVE_LEAF_CAPACITY);
+    if (target_count == 0u || !on_path ||
+        !(target_count <= ADAPTIVE_LEAF_CAPACITY || level == tree_params.depth)) {
+        return;
+    }
+    let tc = vec3<i32>(tc_u);
+    let target_center = cell_center(tc_u, dim);
+    let dim_i = i32(dim);
+    let level_offset = start;
+    var result = tree_fields[target_index];
+    let near_epsilon = max(
+        tree_params.softening,
+        0.72 * WORLD_HALF_EXTENT / f32(dim),
+    );
+    for (var dz = -1; dz <= 1; dz++) {
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0 && dz == 0) {
+                    continue;
+                }
+                let source_c = tc + vec3<i32>(dx, dy, dz);
+                if (any(source_c < vec3<i32>(0)) ||
+                    any(source_c >= vec3<i32>(dim_i))) {
+                    continue;
+                }
+                let source_index = level_offset +
+                    linear_index(vec3<u32>(source_c), dim);
+                result = add_field(
+                    result,
+                    pair_field(source_index, target_center, near_epsilon),
+                );
+            }
+        }
+    }
+    tree_fields[target_index] = result;
+}
+
+fn target_is_on_adaptive_path(local_index: u32) -> bool {
+    if (tree_params.level == 0u) {
+        return true;
+    }
+    let c = cell_coord(local_index, tree_params.level_dim);
+    let parent_cell = c / 2u;
+    let parent_index = tree_params.parent_offset +
+        linear_index(parent_cell, tree_params.parent_dim);
+    return moments_read[parent_index].x > i32(ADAPTIVE_LEAF_CAPACITY);
 }
 
 @compute @workgroup_size(64)
@@ -542,54 +608,6 @@ fn downward(@builtin(global_invocation_id) gid: vec3<u32>) {
         parent_field.a.w - dot(parent_field.a.xyz, delta),
     );
     tree_fields[target_index] = add_field(tree_fields[target_index], inherited);
-}
-
-@compute @workgroup_size(64)
-fn near_field(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let local_index = gid.x;
-    let cell_count = tree_params.level_dim * tree_params.level_dim * tree_params.level_dim;
-    if (local_index >= cell_count) {
-        return;
-    }
-    let target_index = tree_params.level_offset + local_index;
-    let target_count = u32(moments_read[target_index].x);
-    if (target_count == 0u ||
-        !target_is_adaptive_leaf(local_index, target_count)) {
-        return;
-    }
-
-    let tc_u = cell_coord(local_index, tree_params.level_dim);
-    let tc = vec3<i32>(tc_u);
-    let target_center = cell_center(tc_u, tree_params.level_dim);
-    let dim_i = i32(tree_params.level_dim);
-    let level_offset = tree_params.level_offset;
-    let level_dim = tree_params.level_dim;
-    var result = tree_fields[target_index];
-    let near_epsilon = max(
-        tree_params.softening,
-        0.72 * WORLD_HALF_EXTENT / f32(level_dim),
-    );
-    for (var dz = -1; dz <= 1; dz++) {
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0 && dz == 0) {
-                    continue;
-                }
-                let source_c = tc + vec3<i32>(dx, dy, dz);
-                if (any(source_c < vec3<i32>(0)) ||
-                    any(source_c >= vec3<i32>(dim_i))) {
-                    continue;
-                }
-                let source_index = level_offset +
-                    linear_index(vec3<u32>(source_c), level_dim);
-                result = add_field(
-                    result,
-                    pair_field(source_index, target_center, near_epsilon),
-                );
-            }
-        }
-    }
-    tree_fields[target_index] = result;
 }
 
 @compute @workgroup_size(256)

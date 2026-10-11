@@ -186,3 +186,19 @@ playwright-cli -s=rainbow console
 
 For an intentionally small diagnostic plan, pass `?particles=16384`. The
 public control starts at 131,072 and tops out at 5,242,880.
+
+### Native GPU harness
+
+`native/` is a standalone wgpu harness that runs the same WGSL payload and
+planner headlessly on the GPU, with no browser or display. It reports the
+adapter, a content digest of the field and moment buffers (for cross-checking
+against the browser), per-phase GPU time from timestamp queries, the amortized
+wall-clock cost of a solve, and a finiteness check:
+
+```bash
+cd native
+cargo run --release -- 1048576 60
+```
+
+Its `fieldsHash` and `momentsHash` must match the browser for the same budget;
+that is the cross-check that the two hosts drive the shader identically.

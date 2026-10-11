@@ -4,3 +4,5 @@
 
 .playwright-cli
 pkg/rainbow_fmm.wasm
+
+/native/target/

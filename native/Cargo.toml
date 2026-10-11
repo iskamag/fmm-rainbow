@@ -1,0 +1,18 @@
+[package]
+name = "rainbow-native"
+version = "0.1.0"
+edition = "2021"
+description = "Headless native WebGPU harness for the Rainbow FMM shader"
+publish = false
+
+# Standalone workspace so it does not join the demo crate's build.
+[workspace]
+
+[dependencies]
+wgpu = "30"
+pollster = "0.4"
+rainbow-fmm = { path = ".." }
+
+[[bin]]
+name = "rainbow-native"
+path = "main.rs"
